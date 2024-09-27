@@ -66,6 +66,8 @@ MODULE qs_dcdr_utils
    USE particle_types,                  ONLY: particle_type
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_environment_type
+   USE qs_kind_types,                   ONLY: get_qs_kind_set,&
+                                              qs_kind_type
    USE qs_kinetic,                      ONLY: build_kinetic_matrix
    USE qs_ks_types,                     ONLY: qs_ks_env_type
    USE qs_linres_types,                 ONLY: dcdr_env_type,&
@@ -673,6 +675,7 @@ CONTAINS
       TYPE(neighbor_list_set_p_type), DIMENSION(:), &
          POINTER                                         :: sab_all, sab_orb
       TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+      TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
       TYPE(qs_ks_env_type), POINTER                      :: ks_env
       TYPE(section_vals_type), POINTER                   :: dcdr_section, loc_section, lr_section
 
@@ -698,6 +701,7 @@ CONTAINS
 
       NULLIFY (ks_env, dft_control, sab_orb, sab_all, particle_set, molecule_set, matrix_s, matrix_ks, mos, para_env)
       CALL get_qs_env(qs_env=qs_env, &
+                      qs_kind_set=qs_kind_set, &
                       ks_env=ks_env, &
                       dft_control=dft_control, &
                       sab_orb=sab_orb, &
@@ -713,6 +717,9 @@ CONTAINS
       nsubset = SIZE(molecule_set)
       nspins = dft_control%nspins
       dcdr_env%nspins = dft_control%nspins
+
+      ! APT calculation
+      CALL section_vals_val_get(dcdr_section, "CALC_APT", l_val=dcdr_env%calc_apt)
 
       NULLIFY (dcdr_env%matrix_s)
       CALL build_overlap_matrix(ks_env, matrix_s=dcdr_env%matrix_s, &
@@ -991,6 +998,14 @@ CONTAINS
       CALL cp_print_key_finished_output(output_unit, logger, lr_section, &
                                         "PRINT%PROGRAM_RUN_INFO")
 
+      ! Creat full matrix for overlap matrix derivative
+      CALL get_qs_kind_set(qs_kind_set, nsgf=dcdr_env%nsgf)
+      CALL cp_fm_struct_create(fmstruct=dcdr_env%nsgf_fm_struct, &
+                               para_env=para_env, &
+                               context=mo_coeff%matrix_struct%context, &
+                               nrow_global=dcdr_env%nsgf, &
+                               ncol_global=dcdr_env%nsgf)
+
       CALL timestop(handle)
    END SUBROUTINE dcdr_env_init
 
@@ -1017,6 +1032,7 @@ CONTAINS
 
       CALL cp_fm_struct_release(dcdr_env%aoao_fm_struct)
       CALL cp_fm_struct_release(dcdr_env%homohomo_fm_struct)
+      CALL cp_fm_struct_release(dcdr_env%nsgf_fm_struct)
       DO ispin = 1, dcdr_env%nspins
          CALL cp_fm_struct_release(dcdr_env%momo_fm_struct(ispin)%struct)
          CALL cp_fm_struct_release(dcdr_env%likemos_fm_struct(ispin)%struct)

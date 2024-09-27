@@ -356,6 +356,12 @@ CONTAINS
          CALL section_add_keyword(section, keyword)
          CALL keyword_release(keyword)
 
+         CALL keyword_create(keyword, __LOCATION__, name="CALC_APT", &
+                             description="This keyword enables the calculation of atomic polar tensors. Default .TRUE.", &
+                             usage="CALC_APT", default_l_val=.TRUE., lone_keyword_l_val=.TRUE.)
+         CALL section_add_keyword(section, keyword)
+         CALL keyword_release(keyword)
+
          CALL keyword_create(keyword, __LOCATION__, name="LIST_OF_ATOMS", &
                              description="Specifies a list of atoms.", &
                              usage="LIST_OF_ATOMS {integer} {integer} .. {integer}", repeats=.TRUE., &

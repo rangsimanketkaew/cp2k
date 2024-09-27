@@ -22,6 +22,10 @@ MODULE qs_linres_module
                                               cite_reference
    USE cp_control_types,                ONLY: dft_control_type
    USE cp_dbcsr_api,                    ONLY: dbcsr_p_type
+   USE cp_dbcsr_operations,             ONLY: copy_dbcsr_to_fm
+   USE cp_fm_types,                     ONLY: cp_fm_create,&
+                                              cp_fm_set_all,&
+                                              cp_fm_to_fm
    USE cp_log_handling,                 ONLY: cp_get_default_logger,&
                                               cp_logger_type
    USE cp_output_handling,              ONLY: cp_print_key_finished_output,&
@@ -221,17 +225,50 @@ CONTAINS
 !>        and calculates the sum rules for the APT elements.
 !> \param qs_env ...
 !> \param p_env ...
+!> \par History
+!>      11.2021 created [ED]
+!>      09.2024 stored wavefunctions for MolDyn/MetaDyn [RK]
+!> \author Edward Ditler [ED], Rangsiman Ketkaew [RK]
 ! **************************************************************************************************
    SUBROUTINE dcdr_linres(qs_env, p_env)
       TYPE(qs_environment_type), POINTER                 :: qs_env
       TYPE(qs_p_env_type)                                :: p_env
 
-      INTEGER                                            :: beta, latom
+      INTEGER                                            :: beta, ispin, latom, m, n, nspins
       TYPE(dcdr_env_type)                                :: dcdr_env
+      TYPE(dft_control_type), POINTER                    :: dft_control
       TYPE(polar_env_type), POINTER                      :: polar_env
+
+      CALL get_qs_env(qs_env=qs_env, &
+                      dft_control=dft_control)
 
       CALL cite_reference(Ditler2021)
       CALL dcdr_env_init(dcdr_env, qs_env)
+
+      nspins = dft_control%nspins
+
+      ! Store the perturbed wavefunction (nuclear derivative) in linres environment
+      ALLOCATE (qs_env%linres_control%dcdr(SIZE(dcdr_env%list_of_atoms), 3, nspins))
+      CPASSERT(ASSOCIATED(dcdr_env%likemos_fm_struct))
+      ! Store overlap matrix derivative in linres environment
+      ALLOCATE (qs_env%linres_control%matrix_s1(SIZE(dcdr_env%list_of_atoms), 3))
+      ! Create full matrices for derivatives for all atoms
+      DO m = 1, SIZE(dcdr_env%list_of_atoms)
+         DO n = 1, 3
+            ! dCdR
+            DO ispin = 1, nspins
+               CALL cp_fm_create(matrix=qs_env%linres_control%dcdr(m, n, ispin), &
+                                 matrix_struct=dcdr_env%likemos_fm_struct(ispin)%struct, &
+                                 name="dCdR MATRIX")
+               CALL cp_fm_set_all(qs_env%linres_control%dcdr(m, n, ispin), 0.0_dp)
+            END DO
+            ! dSdR
+            CALL cp_fm_create(matrix=qs_env%linres_control%matrix_s1(m, n), &
+                              matrix_struct=dcdr_env%nsgf_fm_struct, &
+                              name="dSdR MATRIX")
+            CALL cp_fm_set_all(qs_env%linres_control%matrix_s1(m, n), 0.0_dp)
+         END DO
+      END DO
 
       IF (.NOT. dcdr_env%z_matrix_method) THEN
 
@@ -246,10 +283,22 @@ CONTAINS
                CALL dcdr_build_op_dR(dcdr_env, qs_env)
                CALL dcdr_response_dR(dcdr_env, p_env, qs_env)
 
-               IF (.NOT. dcdr_env%localized_psi0) THEN
-                  CALL apt_dR(qs_env, dcdr_env)
-               ELSE IF (dcdr_env%localized_psi0) THEN
-                  CALL apt_dR_localization(qs_env, dcdr_env)
+               ! Store the perturbed wavefunction (dCdR) (no. of atoms x 3 directions x no. of spins)
+               DO ispin = 1, nspins
+                  CALL cp_fm_to_fm(dcdr_env%dCR(ispin), &
+                                   qs_env%linres_control%dcdr(latom, beta, ispin))
+               END DO
+               ! Store overlap matrix derivatives (dSdR) (nsgf x nsgf)
+               ! where nsgf = contracted spherical Gaussian basis functions
+               CALL copy_dbcsr_to_fm(dcdr_env%matrix_s1(1 + beta)%matrix, &
+                                     qs_env%linres_control%matrix_s1(latom, beta))
+
+               IF (dcdr_env%calc_apt) THEN
+                  IF (.NOT. dcdr_env%localized_psi0) THEN
+                     CALL apt_dR(qs_env, dcdr_env)
+                  ELSE IF (dcdr_env%localized_psi0) THEN
+                     CALL apt_dR_localization(qs_env, dcdr_env)
+                  END IF
                END IF
 
             END DO !beta
@@ -294,6 +343,12 @@ CONTAINS
          END DO !lambda
 
       END IF
+
+      ! Simply copy GAPT charges
+      ALLOCATE (qs_env%linres_control%gapt_charge(3, 3, SIZE(dcdr_env%list_of_atoms)))
+      DO latom = 1, SIZE(dcdr_env%list_of_atoms)
+         qs_env%linres_control%gapt_charge(:, :, latom) = dcdr_env%apt_total_dcdr(:, :, latom)
+      END DO
 
       CALL dcdr_print(dcdr_env, qs_env)
       CALL dcdr_env_cleanup(qs_env, dcdr_env)
