@@ -245,5 +245,6 @@ registry["M124"] = GenericMatcher(
 registry["M125"] = GenericMatcher(
     r"BSE|DEBUG| Averaged photoabsorption cross section at 8.2 eV:", col=9
 )
+registry["M126"] = GenericMatcher(r"COLVARS| CHARGE  >>> CV =", col=6)
 
 # EOF
