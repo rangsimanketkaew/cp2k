@@ -250,4 +250,6 @@ registry["RTBSE_GXAC_H2_pol"] = GenericMatcher(
     r"POLARIZABILITY_PADE|     0.30450000E+002", col=4
 )
 
+registry["M126"] = GenericMatcher(r"COLVARS| CHARGE  >>> CV =", col=6)
+
 # EOF
