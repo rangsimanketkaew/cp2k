@@ -230,6 +230,10 @@ CONTAINS
       CALL section_add_subsection(section, subsection)
       CALL section_release(subsection)
 
+      CALL create_colvar_dipole_section(subsection)
+      CALL section_add_subsection(section, subsection)
+      CALL section_release(subsection)
+
       IF (.NOT. skip_recursive_colvar) THEN
          CALL create_colvar_rpath_section(subsection)
          CALL section_add_subsection(section, subsection)
@@ -2297,6 +2301,54 @@ CONTAINS
       CALL section_release(subsection)
 
    END SUBROUTINE create_colvar_ring_puckering_section
+
+! **************************************************************************************************
+ !> \brief Collective variables specifying electric dipole moment.
+ !> \param section the section to be created
+ !> \date  05.2025
+ !> \author Rangsiman Ketkaew
+ ! **************************************************************************************************
+   SUBROUTINE create_colvar_dipole_section(section)
+
+   TYPE(section_type), POINTER                        :: section
+
+   TYPE(keyword_type), POINTER                        :: keyword
+   TYPE(section_type), POINTER                        :: subsection
+   
+   CPASSERT(.NOT. ASSOCIATED(section))
+   CALL section_create(section, __LOCATION__, &
+                        name="DIPOLE", &
+                        description="Section to define electric dipole moment as collective variables.", &
+                        n_keywords=1, &
+                        n_subsections=0, &
+                        repeats=.FALSE.)
+   NULLIFY (keyword, subsection)
+
+   CALL keyword_create(keyword, __LOCATION__, &
+                        name="ATOMS", &
+                        description="Specifies the indexes of atoms to be involved in calculating the CV gradient", &
+                        usage="ATOMS {integer} {integer} {integer} ..", &
+                        n_var=-1, &
+                        type_of_var=integer_t)
+   CALL section_add_keyword(section, keyword)
+   CALL keyword_release(keyword)
+
+   CALL keyword_create(keyword, __LOCATION__, name="COMPONENT", &
+                        description="Define the direction of electric dipole moment which will be used "// &
+                        "as a colvar. XYZ means the total electric dipole moment.", &
+                        usage="COMPONENT (XYZ | X | Y | Z)", &
+                        enum_c_vals=s2a("XYZ", "X", "Y", "Z"), &
+                        enum_i_vals=(/do_clv_xyz, do_clv_x, do_clv_y, do_clv_z/), &
+                        default_i_val=do_clv_xyz)
+   CALL section_add_keyword(section, keyword)
+   CALL keyword_release(keyword)
+
+   ! Must be present in each colvar and handled properly
+   CALL create_point_section(subsection)
+   CALL section_add_subsection(section, subsection)
+   CALL section_release(subsection)
+
+   END SUBROUTINE create_colvar_dipole_section
 
 ! **************************************************************************************************
 

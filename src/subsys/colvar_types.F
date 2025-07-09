@@ -48,6 +48,7 @@ MODULE colvar_types
              colvar_setup, &
              colvar_release, &
              colvar_counters, &
+             colvar_electronic_type, &
              eval_point_der, &
              eval_point_pos, &
              eval_point_mass, &
@@ -79,7 +80,8 @@ MODULE colvar_types
                                  mindist_colvar_id = 23, &
                                  acid_hyd_dist_colvar_id = 24, &
                                  acid_hyd_shell_colvar_id = 25, &
-                                 hydronium_dist_colvar_id = 26
+                                 hydronium_dist_colvar_id = 26, &
+                                 dipole_colvar_id = 27
 
 ! **************************************************************************************************
 !> \brief parameters for the distance collective variable
@@ -340,6 +342,12 @@ MODULE colvar_types
    END TYPE mindist_colvar_type
 
 ! **************************************************************************************************
+   TYPE dipole_colvar_type
+      INTEGER, DIMENSION(:), POINTER           :: atoms
+      INTEGER                                  :: component = 0
+   END TYPE dipole_colvar_type
+
+! **************************************************************************************************
 !> \brief parameters for a collective variable
 !> \author alessandro laio and fawzi mohamed
 ! **************************************************************************************************
@@ -377,6 +385,7 @@ MODULE colvar_types
       TYPE(HBP_colvar_type), POINTER               :: HBP => NULL()
       TYPE(ring_puckering_colvar_type), POINTER    :: ring_puckering_param => NULL()
       TYPE(mindist_colvar_type), POINTER           :: mindist_param => NULL()
+      TYPE(dipole_colvar_type), POINTER            :: dipole_param => NULL()
    END TYPE colvar_type
 
 ! **************************************************************************************************
@@ -408,6 +417,11 @@ MODULE colvar_types
       INTEGER :: nxyz_outerdiag = 0
       INTEGER :: ntot = 0
    END TYPE colvar_counters
+
+! **************************************************************************************************
+   TYPE colvar_electronic_type
+      REAL(KIND=dp), DIMENSION(:, :, :), POINTER         :: apt_total_dcdr => NULL()
+   END TYPE colvar_electronic_type
 
 CONTAINS
 
@@ -485,6 +499,8 @@ CONTAINS
          ALLOCATE (colvar%ring_puckering_param)
       CASE (mindist_colvar_id)
          ALLOCATE (colvar%mindist_param)
+      CASE (dipole_colvar_id)
+         ALLOCATE (colvar%dipole_param)
       CASE (no_colvar_id)
          ! Do nothing
       CASE DEFAULT
@@ -957,6 +973,26 @@ CONTAINS
                list(idum) = colvar%combine_cvs_param%colvar_p(ii)%colvar%i_atom(j)
             END DO
          END DO
+      CASE (dipole_colvar_id)
+         np = SIZE(colvar%dipole_param%atoms)
+         ! Number of real atoms involved in the colvar
+         colvar%n_atom_s = 0
+         ! Count number of atoms
+         DO ii = 1, np
+            i = colvar%dipole_param%atoms(ii)
+            IF (i <= 0) THEN
+               CALL cp_abort(__LOCATION__, "Atomic index must be greater than 0! Check ATOMS again.")
+            ELSE
+               colvar%n_atom_s = colvar%n_atom_s + COLV_SIZE(colvar, i)
+            END IF
+         END DO
+         ! Create a list of points...
+         ALLOCATE (list(np))
+         DO ii = 1, np
+            list(ii) = colvar%dipole_param%atoms(ii)
+         END DO
+         CPASSERT(SIZE(list) == np)
+
       END SELECT
 
       IF (ASSOCIATED(colvar%dsdr)) THEN
@@ -1333,6 +1369,9 @@ CONTAINS
             DEALLOCATE (colvar%mindist_param%k_coord_to)
          END IF
          DEALLOCATE (colvar%mindist_param)
+      CASE (dipole_colvar_id)
+         DEALLOCATE (colvar%dipole_param%atoms)
+         DEALLOCATE (colvar%dipole_param)
       CASE (no_colvar_id)
          ! Do nothing
       CASE default
@@ -1732,6 +1771,8 @@ CONTAINS
             ALLOCATE (colvar_out%mindist_param%i_coord_to(ndim))
             colvar_out%mindist_param%i_coord_to = colvar_in%mindist_param%i_coord_to + my_offset
          END IF
+      CASE (dipole_colvar_id)
+         colvar_out%dipole_param%component = colvar_in%dipole_param%component
 
       END SELECT
       CALL colvar_setup(colvar_out)

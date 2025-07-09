@@ -20,7 +20,7 @@ MODULE colvar_methods
    USE colvar_types,                    ONLY: &
         HBP_colvar_id, Wc_colvar_id, acid_hyd_dist_colvar_id, acid_hyd_shell_colvar_id, &
         angle_colvar_id, colvar_create, colvar_setup, colvar_type, combine_colvar_id, &
-        coord_colvar_id, dfunct_colvar_id, dist_colvar_id, distance_from_path_colvar_id, &
+        coord_colvar_id, dfunct_colvar_id, dipole_colvar_id, dist_colvar_id, distance_from_path_colvar_id, &
         do_clv_fix_point, do_clv_geo_center, do_clv_x, do_clv_xy, do_clv_xz, do_clv_y, do_clv_yz, &
         do_clv_z, eval_point_der, eval_point_mass, eval_point_pos, gyration_colvar_id, &
         hydronium_dist_colvar_id, hydronium_shell_colvar_id, mindist_colvar_id, plane_def_atoms, &
@@ -35,6 +35,8 @@ MODULE colvar_methods
                                               cp_to_string
    USE cp_output_handling,              ONLY: cp_print_key_finished_output,&
                                               cp_print_key_unit_nr
+   USE cp_result_methods,               ONLY: get_results
+   USE cp_result_types,                 ONLY: cp_result_type
    USE cp_parser_methods,               ONLY: parser_get_next_line,&
                                               parser_get_object
    USE cp_parser_types,                 ONLY: cp_parser_type,&
@@ -130,7 +132,7 @@ CONTAINS
       CHARACTER(LEN=3)                                   :: fmid
       CHARACTER(LEN=7)                                   :: tag, tag_comp, tag_comp1, tag_comp2
       CHARACTER(LEN=default_path_length)                 :: path_function
-      CHARACTER(LEN=default_string_length)               :: tmpStr, tmpStr2
+      CHARACTER(LEN=default_string_length)               :: tmpStr, tmpStr2, dipole_component
       CHARACTER(LEN=default_string_length), &
          DIMENSION(:), POINTER                           :: c_kinds, my_par
       INTEGER                                            :: handle, i, iatm, icomponent, iend, &
@@ -140,7 +142,7 @@ CONTAINS
       INTEGER, DIMENSION(:), POINTER                     :: iatms
       INTEGER, DIMENSION(:, :), POINTER                  :: p_bounds
       LOGICAL                                            :: check, use_mixed_energy
-      LOGICAL, DIMENSION(26)                             :: my_subsection
+      LOGICAL, DIMENSION(27)                             :: my_subsection
       REAL(dp), DIMENSION(:), POINTER                    :: s1, wei, weights
       REAL(dp), DIMENSION(:, :), POINTER                 :: p_range, s1v
       REAL(KIND=dp), DIMENSION(1)                        :: my_val
@@ -152,7 +154,7 @@ CONTAINS
       TYPE(section_type), POINTER                        :: section
       TYPE(section_vals_type), POINTER :: acid_hyd_dist_section, acid_hyd_shell_section, &
          angle_section, colvar_subsection, combine_section, coordination_section, dfunct_section, &
-         distance_from_path_section, distance_section, frame_section, gyration_section, &
+         dipole_section, distance_from_path_section, distance_section, frame_section, gyration_section, &
          HBP_section, hydronium_dist_section, hydronium_shell_section, mindist_section, &
          path_section, plane_dist_section, plane_plane_angle_section, plane_sections, &
          point_section, population_section, qparm_section, reaction_path_section, &
@@ -198,6 +200,7 @@ CONTAINS
       ring_puckering_section &
          => section_vals_get_subs_vals(colvar_section, "RING_PUCKERING", i_rep_section=icol)
       mindist_section => section_vals_get_subs_vals(colvar_section, "CONDITIONED_DISTANCE", i_rep_section=icol)
+      dipole_section => section_vals_get_subs_vals(colvar_section, "DIPOLE", i_rep_section=icol)
 
       CALL section_vals_get(distance_section, explicit=my_subsection(1))
       CALL section_vals_get(angle_section, explicit=my_subsection(2))
@@ -236,6 +239,7 @@ CONTAINS
       CALL section_vals_get(acid_hyd_dist_section, explicit=my_subsection(24))
       CALL section_vals_get(acid_hyd_shell_section, explicit=my_subsection(25))
       CALL section_vals_get(hydronium_dist_section, explicit=my_subsection(26))
+      CALL section_vals_get(dipole_section, explicit=my_subsection(27))
 
       ! Only one colvar can be present
       CPASSERT(COUNT(my_subsection) == 1)
@@ -1054,6 +1058,27 @@ CONTAINS
                                      colvar%hydronium_dist_param%n_hydrogens, &
                                      colvar%hydronium_dist_param%i_oxygens, &
                                      colvar%hydronium_dist_param%i_hydrogens)
+      ELSE IF (my_subsection(27)) THEN
+         CALL colvar_create(colvar, dipole_colvar_id)
+         CALL colvar_check_points(colvar, dipole_section)
+         ! Get atom indices
+         ! This section can be repeated
+         NULLIFY (colvar%dipole_param%atoms)
+         CALL section_vals_val_get(dipole_section, "ATOMS", n_rep_val=n_var)
+         CPASSERT(n_var > 0)
+         ndim = 0
+         IF (n_var /= 0) THEN
+            ! INDEX LIST
+            DO i = 1, n_var
+               CALL section_vals_val_get(dipole_section, "ATOMS", i_rep_val=i, i_vals=iatms)
+               CALL reallocate(colvar%dipole_param%atoms, 1, ndim + SIZE(iatms))
+               colvar%dipole_param%atoms(ndim + 1:ndim + SIZE(iatms)) = iatms
+               ndim = ndim + SIZE(iatms)
+            END DO
+            colvar%dipole_param%atoms = ndim
+         END IF
+         ! Get the component (direction) of dipole moment
+         CALL section_vals_val_get(dipole_section, "COMPONENT", i_val=colvar%dipole_param%component)
       END IF
       CALL colvar_setup(colvar)
 
@@ -1351,6 +1376,21 @@ CONTAINS
             WRITE (iw, '( A,T71,I10)') ' COLVARS| NN', colvar%mindist_param%p_exp
             WRITE (iw, '( A,T71,I10)') ' COLVARS| ND', colvar%mindist_param%q_exp
             WRITE (iw, '( A,T71,F10.5)') ' COLVARS| LAMBDA', colvar%mindist_param%lambda
+         CASE (dipole_colvar_id)
+            WRITE (iw, '( A)') ' COLVARS| ELECTRIC DIPOLE MOMENT>> '
+            SELECT CASE (colvar%dipole_param%component)
+            CASE (0)
+               dipole_component = "TOTAL"
+            CASE (1)
+               dipole_component = "X"
+            CASE (2)
+               dipole_component = "Y"
+            CASE (3)
+               dipole_component = "Z"
+            CASE DEFAULT
+               CPABORT("Supports only dipole moment in X, Y, or Z direction, or TOTAL.")
+            END SELECT
+            WRITE (iw, '( A,T76,A)') ' COLVARS| COMPONENT : ', TRIM(dipole_component)
 
          END SELECT
          IF (colvar%use_points) THEN
@@ -1704,6 +1744,8 @@ CONTAINS
       CASE (HBP_colvar_id)
          !!! FIXME this is rubbish at the moment as we have no force to be computed on this
          CALL HBP_colvar(colvar, cell, particles=particles)
+      CASE (dipole_colvar_id)
+         CALL dipole_colvar(colvar, particles=particles)
       CASE DEFAULT
          CPABORT("")
       END SELECT
@@ -1792,6 +1834,8 @@ CONTAINS
          CALL ring_puckering_colvar(colvar, cell, subsys=subsys)
       CASE (mindist_colvar_id)
          CALL mindist_colvar(colvar, cell, subsys=subsys)
+      CASE (dipole_colvar_id)
+         CALL dipole_colvar(colvar, subsys=subsys, force_env=force_env)
       CASE DEFAULT
          CPABORT("")
       END SELECT
@@ -1864,6 +1908,8 @@ CONTAINS
          CALL Wc_colvar(colvar, cell, particles=particles)
       CASE (HBP_colvar_id)
          CALL HBP_colvar(colvar, cell, particles=particles)
+      CASE (dipole_colvar_id)
+         CALL dipole_colvar(colvar, particles=particles)
       CASE DEFAULT
          CPABORT("")
       END SELECT
@@ -6094,5 +6140,105 @@ CONTAINS
       END FUNCTION distance
 
    END SUBROUTINE HBP_colvar
+
+! **************************************************************************************************
+ !> \brief Driver for the electric dipole moment collective variable (CV) calculation
+ !>        evaluate the force due the electric dipole moment as a CV
+ !> \param colvar Collective variables information
+ !> \param subsys Subsystem information
+ !> \param particles Particles information
+ !> \param force_env Force environment
+ !> \date  05.2025
+ !> \author Rangsiman Ketkaew
+ ! **************************************************************************************************
+ 
+   SUBROUTINE dipole_colvar(colvar, subsys, particles, force_env)
+ 
+      TYPE(colvar_type), POINTER                         :: colvar
+      TYPE(cp_subsys_type), OPTIONAL, POINTER            :: subsys
+      TYPE(particle_type), DIMENSION(:), OPTIONAL, &
+         POINTER                                         :: particles
+      TYPE(force_env_type), POINTER, OPTIONAL            :: force_env
+
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'dipole_colvar'
+
+      CHARACTER(LEN=default_string_length)               :: description
+      INTEGER                                            :: handle
+      INTEGER                                            :: i, natom, component
+      REAL(KIND=dp), DIMENSION(3)                        :: dcv_dr
+      REAL(KIND=dp), DIMENSION(3)                        :: dipole_moment = 0._dp
+      REAL(KIND=dp), DIMENSION(:, :, :), POINTER         :: apt_dcdr
+      TYPE(cp_result_type), POINTER                      :: results
+      TYPE(particle_list_type), POINTER                  :: particles_i
+      TYPE(particle_type), DIMENSION(:), POINTER         :: my_particles
+      TYPE(qs_environment_type), POINTER                 :: qs_env
+
+      CALL timeset(routineN, handle)
+
+      NULLIFY (particles_i)
+
+      ! CALL force_env_get(force_env=force_env, subsys=subsys_main)
+      qs_env => force_env%qs_env
+      
+      ! Get the total number of atoms in the system
+      IF (PRESENT(particles)) THEN
+         my_particles => particles
+      ELSE
+         CPASSERT(PRESENT(subsys))
+         CALL cp_subsys_get(subsys, particles=particles_i)
+         my_particles => particles_i%els
+      END IF
+      natom = SIZE(my_particles)
+
+      component = colvar%dipole_param%component
+
+      ! Assign CV value
+      CALL get_qs_env(qs_env, results=results)
+      description = "[DIPOLE]"
+      CALL get_results(results=results, description=description, values=dipole_moment(1:3))
+
+      SELECT CASE (component)
+      CASE (0)
+         colvar%ss = SQRT(SUM(dipole_moment(1:3)**2))
+      CASE (1)
+         colvar%ss = dipole_moment(1)
+      CASE (2)
+         colvar%ss = dipole_moment(2)
+      CASE (3)
+         colvar%ss = dipole_moment(3)
+      CASE DEFAULT
+         CPABORT("Supports only dipole moment in X, Y, or Z direction, or TOTAL.")
+      END SELECT
+
+      ! Assign dCV/dR values from total d(APT)/dR
+      ! apt_total_dcdr(beta, alpha, lambda)
+      !     beta = Cartesian coordinates of atom
+      !     alpha = Component of the dipole moment
+      !     lambda = Nucleus
+      apt_dcdr => qs_env%colvar_elec%apt_total_dcdr
+
+      DO i = 1, natom
+         SELECT CASE (component)
+         CASE (0)
+            dcv_dr = SUM(apt_dcdr(:, :, i), dim=2)
+         CASE (1)
+            dcv_dr = apt_dcdr(:, 1, i)
+         CASE (2)
+            dcv_dr = apt_dcdr(:, 2, i)
+         CASE (3)
+            dcv_dr = apt_dcdr(:, 3, i)
+         CASE DEFAULT
+            CPABORT("Supports only dipole moment in X, Y, or Z direction, or TOTAL.")
+         END SELECT
+         CALL put_derivative(colvar, i, dcv_dr)
+      END DO
+
+      ! Clean everything after using electric colvar env
+      DEALLOCATE (qs_env%colvar_elec%apt_total_dcdr)
+      DEALLOCATE (qs_env%colvar_elec)
+
+      CALL timestop(handle)
+ 
+   END SUBROUTINE dipole_colvar
 
 END MODULE colvar_methods
