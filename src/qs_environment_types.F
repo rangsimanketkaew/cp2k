@@ -21,6 +21,7 @@ MODULE qs_environment_types
    USE cell_types,                      ONLY: cell_release,&
                                               cell_retain,&
                                               cell_type
+   USE colvar_types,                    ONLY: colvar_electronic_type
    USE cp_blacs_env,                    ONLY: cp_blacs_env_type
    USE cp_control_types,                ONLY: dft_control_type
    USE cp_dbcsr_api,                    ONLY: dbcsr_distribution_type,&
@@ -319,6 +320,7 @@ MODULE qs_environment_types
       TYPE(mo_set_type), DIMENSION(:), POINTER              :: mos_last_converged => NULL()
       ! tblite
       TYPE(tblite_type), POINTER                            :: tb_tblite => Null()
+      TYPE(colvar_electronic_type), POINTER                 :: colvar_elec => Null()
    END TYPE qs_environment_type
 
 CONTAINS
@@ -484,6 +486,7 @@ CONTAINS
 !> \param eeq ...
 !> \param rhs ...
 !> \param tb_tblite ...
+!> \param colvar_elec
 !> \date    23.01.2002
 !> \author  MK
 !> \version 1.0
@@ -514,7 +517,7 @@ CONTAINS
                          WannierCentres, atprop, ls_scf_env, do_transport, transport_env, v_hartree_rspace, &
                          s_mstruct_changed, rho_changed, potential_changed, forces_up_to_date, mscfg_env, almo_scf_env, &
                          gradient_history, variable_history, embed_pot, spin_embed_pot, polar_env, mos_last_converged, &
-                         eeq, rhs, tb_tblite)
+                         eeq, rhs, tb_tblite, colvar_elec)
       TYPE(qs_environment_type), INTENT(IN)              :: qs_env
       TYPE(atomic_kind_type), DIMENSION(:), OPTIONAL, &
          POINTER                                         :: atomic_kind_set
@@ -649,6 +652,7 @@ CONTAINS
       TYPE(mo_set_type), DIMENSION(:), OPTIONAL, POINTER :: mos_last_converged
       REAL(KIND=dp), DIMENSION(:), OPTIONAL, POINTER     :: eeq, rhs
       TYPE(tblite_type), OPTIONAL, POINTER               :: tb_tblite
+      TYPE(colvar_electronic_type), OPTIONAL, POINTER    :: colvar_elec
 
       TYPE(rho0_mpole_type), POINTER                     :: rho0_m
 
@@ -843,6 +847,7 @@ CONTAINS
                       nelectron_spin=nelectron_spin)
 
       IF (PRESENT(tb_tblite)) tb_tblite => qs_env%tb_tblite
+      IF (PRESENT(colvar_elec)) colvar_elec => qs_env%colvar_elec
 
    END SUBROUTINE get_qs_env
 
@@ -963,6 +968,7 @@ CONTAINS
       IF (.NOT. ASSOCIATED(qs_env%molecular_scf_guess_env)) ALLOCATE (qs_env%molecular_scf_guess_env)
 
       NULLIFY (qs_env%tb_tblite)
+      NULLIFY (qs_env%colvar_elec)
 
    END SUBROUTINE init_qs_env
 

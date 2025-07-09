@@ -26,6 +26,8 @@ MODULE qs_linres_module
                                               cp_logger_type
    USE cp_output_handling,              ONLY: cp_print_key_finished_output,&
                                               cp_print_key_unit_nr
+   USE cp_result_methods,               ONLY: cp_results_erase,&
+                                              put_results
    USE force_env_types,                 ONLY: force_env_get,&
                                               force_env_type,&
                                               use_qmmm,&
@@ -294,6 +296,11 @@ CONTAINS
          END DO !lambda
 
       END IF
+
+      ! Store APT matrix in the electronic collective variable environment
+      ALLOCATE (qs_env%colvar_elec)
+      ALLOCATE (qs_env%colvar_elec%apt_total_dcdr(3, 3, SIZE(dcdr_env%list_of_atoms)))
+      qs_env%colvar_elec%apt_total_dcdr = dcdr_env%apt_total_dcdr
 
       CALL dcdr_print(dcdr_env, qs_env)
       CALL dcdr_env_cleanup(qs_env, dcdr_env)
