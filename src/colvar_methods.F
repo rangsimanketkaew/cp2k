@@ -15,20 +15,46 @@
 ! **************************************************************************************************
 MODULE colvar_methods
 
+   USE atomic_kind_types,               ONLY: atomic_kind_type,&
+                                              get_atomic_kind,&
+                                              get_atomic_kind_set
+   USE basis_set_types,                 ONLY: get_gto_basis_set,&
+                                              gto_basis_set_type
    USE cell_types,                      ONLY: cell_type,&
                                               pbc
+   USE colvar_elec_utils,               ONLY: charge_cv_cleanup,&
+                                              mult_fm_fm_fm,&
+                                              mult_fm_sm_fm
    USE colvar_types,                    ONLY: &
         HBP_colvar_id, Wc_colvar_id, acid_hyd_dist_colvar_id, acid_hyd_shell_colvar_id, &
-        angle_colvar_id, colvar_create, colvar_setup, colvar_type, combine_colvar_id, &
-        coord_colvar_id, dfunct_colvar_id, dist_colvar_id, distance_from_path_colvar_id, &
-        do_clv_fix_point, do_clv_geo_center, do_clv_x, do_clv_xy, do_clv_xz, do_clv_y, do_clv_yz, &
-        do_clv_z, eval_point_der, eval_point_mass, eval_point_pos, gyration_colvar_id, &
-        hydronium_dist_colvar_id, hydronium_shell_colvar_id, mindist_colvar_id, plane_def_atoms, &
-        plane_def_vec, plane_distance_colvar_id, plane_plane_angle_colvar_id, &
-        population_colvar_id, qparm_colvar_id, reaction_path_colvar_id, ring_puckering_colvar_id, &
-        rmsd_colvar_id, rotation_colvar_id, torsion_colvar_id, u_colvar_id, xyz_diag_colvar_id, &
-        xyz_outerdiag_colvar_id
+        angle_colvar_id, charge_colvar_id, colvar_create, colvar_setup, colvar_type, &
+        combine_colvar_id, coord_colvar_id, dfunct_colvar_id, dist_colvar_id, &
+        distance_from_path_colvar_id, do_clv_fix_point, do_clv_geo_center, do_clv_x, do_clv_xy, &
+        do_clv_xz, do_clv_y, do_clv_yz, do_clv_z, eval_point_der, eval_point_mass, eval_point_pos, &
+        gyration_colvar_id, hydronium_dist_colvar_id, hydronium_shell_colvar_id, &
+        mindist_colvar_id, plane_def_atoms, plane_def_vec, plane_distance_colvar_id, &
+        plane_plane_angle_colvar_id, population_colvar_id, qparm_colvar_id, &
+        reaction_path_colvar_id, ring_puckering_colvar_id, rmsd_colvar_id, rotation_colvar_id, &
+        torsion_colvar_id, u_colvar_id, xyz_diag_colvar_id, xyz_outerdiag_colvar_id
    USE constraint_fxd,                  ONLY: check_fixed_atom_cns_colv
+   USE cp_control_types,                ONLY: dft_control_type
+   USE cp_dbcsr_api,                    ONLY: dbcsr_get_block_p,&
+                                              dbcsr_iterator_blocks_left,&
+                                              dbcsr_iterator_next_block,&
+                                              dbcsr_iterator_start,&
+                                              dbcsr_iterator_stop,&
+                                              dbcsr_iterator_type,&
+                                              dbcsr_p_type,&
+                                              dbcsr_type
+   USE cp_fm_basic_linalg,              ONLY: cp_fm_trace
+   USE cp_fm_struct,                    ONLY: cp_fm_struct_create,&
+                                              cp_fm_struct_release,&
+                                              cp_fm_struct_type
+   USE cp_fm_types,                     ONLY: cp_fm_create,&
+                                              cp_fm_release,&
+                                              cp_fm_set_all,&
+                                              cp_fm_type,&
+                                              cp_fm_write_formatted
    USE cp_log_handling,                 ONLY: cp_get_default_logger,&
                                               cp_logger_get_default_io_unit,&
                                               cp_logger_type,&
@@ -40,6 +66,8 @@ MODULE colvar_methods
    USE cp_parser_types,                 ONLY: cp_parser_type,&
                                               parser_create,&
                                               parser_release
+   USE cp_result_methods,               ONLY: get_results
+   USE cp_result_types,                 ONLY: cp_result_type
    USE cp_subsys_types,                 ONLY: cp_subsys_get,&
                                               cp_subsys_p_type,&
                                               cp_subsys_type
@@ -84,16 +112,26 @@ MODULE colvar_methods
    USE mixed_energy_types,              ONLY: mixed_force_type
    USE mixed_environment_utils,         ONLY: get_subsys_map_index
    USE molecule_kind_types,             ONLY: fixd_constraint_type
+   USE orbital_pointers,                ONLY: nso
    USE particle_list_types,             ONLY: particle_list_p_type,&
                                               particle_list_type
+   USE particle_methods,                ONLY: get_particle_set
    USE particle_types,                  ONLY: particle_type
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_environment_type
+   USE qs_kind_types,                   ONLY: get_qs_kind,&
+                                              get_qs_kind_set,&
+                                              qs_kind_type
+   USE qs_mo_types,                     ONLY: get_mo_set,&
+                                              mo_set_type
+   USE qs_rho_types,                    ONLY: qs_rho_get,&
+                                              qs_rho_type
    USE rmsd,                            ONLY: rmsd3
    USE spherical_harmonics,             ONLY: dlegendre,&
                                               legendre
    USE string_utilities,                ONLY: compress,&
                                               uppercase
+   USE util,                            ONLY: sort_unique
    USE wannier_states_types,            ONLY: wannier_centres_type
 #include "./base/base_uses.f90"
 
@@ -140,7 +178,7 @@ CONTAINS
       INTEGER, DIMENSION(:), POINTER                     :: iatms
       INTEGER, DIMENSION(:, :), POINTER                  :: p_bounds
       LOGICAL                                            :: check, use_mixed_energy
-      LOGICAL, DIMENSION(26)                             :: my_subsection
+      LOGICAL, DIMENSION(27)                             :: my_subsection
       REAL(dp), DIMENSION(:), POINTER                    :: s1, wei, weights
       REAL(dp), DIMENSION(:, :), POINTER                 :: p_range, s1v
       REAL(KIND=dp), DIMENSION(1)                        :: my_val
@@ -151,14 +189,14 @@ CONTAINS
       TYPE(keyword_type), POINTER                        :: keyword
       TYPE(section_type), POINTER                        :: section
       TYPE(section_vals_type), POINTER :: acid_hyd_dist_section, acid_hyd_shell_section, &
-         angle_section, colvar_subsection, combine_section, coordination_section, dfunct_section, &
-         distance_from_path_section, distance_section, frame_section, gyration_section, &
-         HBP_section, hydronium_dist_section, hydronium_shell_section, mindist_section, &
-         path_section, plane_dist_section, plane_plane_angle_section, plane_sections, &
-         point_section, population_section, qparm_section, reaction_path_section, &
+         angle_section, charge_section, colvar_subsection, combine_section, coordination_section, &
+         dfunct_section, distance_from_path_section, distance_section, frame_section, &
+         gyration_section, HBP_section, hydronium_dist_section, hydronium_shell_section, &
+         mindist_section, path_section, plane_dist_section, plane_plane_angle_section, &
+         plane_sections, point_section, population_section, qparm_section, reaction_path_section, &
          ring_puckering_section, rmsd_section, rotation_section, torsion_section, u_section, &
-         Wc_section, wrk_section
-      TYPE(section_vals_type), POINTER :: xyz_diag_section, xyz_outerdiag_section
+         Wc_section
+      TYPE(section_vals_type), POINTER :: wrk_section, xyz_diag_section, xyz_outerdiag_section
 
       CALL timeset(routineN, handle)
       NULLIFY (logger, c_kinds, iatms)
@@ -198,6 +236,7 @@ CONTAINS
       ring_puckering_section &
          => section_vals_get_subs_vals(colvar_section, "RING_PUCKERING", i_rep_section=icol)
       mindist_section => section_vals_get_subs_vals(colvar_section, "CONDITIONED_DISTANCE", i_rep_section=icol)
+      charge_section => section_vals_get_subs_vals(colvar_section, "CHARGE", i_rep_section=icol)
 
       CALL section_vals_get(distance_section, explicit=my_subsection(1))
       CALL section_vals_get(angle_section, explicit=my_subsection(2))
@@ -236,6 +275,7 @@ CONTAINS
       CALL section_vals_get(acid_hyd_dist_section, explicit=my_subsection(24))
       CALL section_vals_get(acid_hyd_shell_section, explicit=my_subsection(25))
       CALL section_vals_get(hydronium_dist_section, explicit=my_subsection(26))
+      CALL section_vals_get(charge_section, explicit=my_subsection(27))
 
       ! Only one colvar can be present
       CPASSERT(COUNT(my_subsection) == 1)
@@ -1054,7 +1094,49 @@ CONTAINS
                                      colvar%hydronium_dist_param%n_hydrogens, &
                                      colvar%hydronium_dist_param%i_oxygens, &
                                      colvar%hydronium_dist_param%i_hydrogens)
+      ELSE IF (my_subsection(27)) THEN
+         ! Charge (population)
+         wrk_section => charge_section
+         CALL colvar_create(colvar, charge_colvar_id)
+         NULLIFY (colvar%charge_param%group_1)
+         NULLIFY (colvar%charge_param%group_2)
+         ! This section can be repeated
+         ! Get the number of atoms in group 1 defined in an input file
+         CALL section_vals_val_get(charge_section, "GROUP_1", n_rep_val=n_var)
+         CPASSERT(n_var > 0)
+         ndim = 0
+         IF (n_var /= 0) THEN
+            ! INDEX LIST
+            DO i = 1, n_var
+               ! Get each index and store in group 1
+               CALL section_vals_val_get(charge_section, "GROUP_1", i_rep_val=i, i_vals=iatms)
+               CALL reallocate(colvar%charge_param%group_1, 1, ndim + SIZE(iatms))
+               colvar%charge_param%group_1(ndim + 1:ndim + SIZE(iatms)) = iatms
+               ndim = ndim + SIZE(iatms)
+            END DO
+            colvar%charge_param%n_atoms_group_1 = ndim
+         END IF
+         ! Get the number of atoms in group 2 defined in an input file
+         CALL section_vals_val_get(charge_section, "GROUP_2", n_rep_val=n_var)
+         CPASSERT(n_var > 0)
+         ndim = 0
+         IF (n_var /= 0) THEN
+            ! INDEX LIST
+            DO i = 1, n_var
+               ! Get each index and store in group 2
+               CALL section_vals_val_get(charge_section, "GROUP_2", i_rep_val=i, i_vals=iatms)
+               CALL reallocate(colvar%charge_param%group_2, 1, ndim + SIZE(iatms))
+               colvar%charge_param%group_2(ndim + 1:ndim + SIZE(iatms)) = iatms
+               ndim = ndim + SIZE(iatms)
+            END DO
+            colvar%charge_param%n_atoms_group_2 = ndim
+         END IF
+         CALL section_vals_val_get(charge_section, "POPULATION", c_val=colvar%charge_param%pop_method)
+         CALL section_vals_val_get(charge_section, "FUNCTION", c_val=colvar%charge_param%func)
+         CALL section_vals_val_get(charge_section, "PRINT_LEVEL", i_val=colvar%charge_param%print_level)
       END IF
+      !---------------------------------------------------------------------
+      ! Finalize Colvar setup
       CALL colvar_setup(colvar)
 
       iw = cp_print_key_unit_nr(logger, colvar_section, &
@@ -1351,6 +1433,18 @@ CONTAINS
             WRITE (iw, '( A,T71,I10)') ' COLVARS| NN', colvar%mindist_param%p_exp
             WRITE (iw, '( A,T71,I10)') ' COLVARS| ND', colvar%mindist_param%q_exp
             WRITE (iw, '( A,T71,F10.5)') ' COLVARS| LAMBDA', colvar%mindist_param%lambda
+         CASE (charge_colvar_id)
+            WRITE (iw, '( A)') ' COLVARS| CHARGE COLVAR'
+            WRITE (iw, '( A,T71,I10)') (' COLVARS| CHARGE  >>> ATOMS IN GROUP 1', &
+                                        colvar%charge_param%group_1(k), &
+                                        k=1, SIZE(colvar%charge_param%group_1))
+            WRITE (iw, '( A,T71,I10)') (' COLVARS| CHARGE  >>> ATOMS IN GROUP 2', &
+                                        colvar%charge_param%group_2(k), &
+                                        k=1, SIZE(colvar%charge_param%group_2))
+            WRITE (iw, '( A,A)') ' COLVARS| CHARGE  >>> POPULATION    : ', &
+               TRIM(colvar%charge_param%pop_method)
+            WRITE (iw, '( A,A)') ' COLVARS| CHARGE  >>> MATH FUNCTION : ', &
+               TRIM(colvar%charge_param%func)
 
          END SELECT
          IF (colvar%use_points) THEN
@@ -1704,8 +1798,10 @@ CONTAINS
       CASE (HBP_colvar_id)
          !!! FIXME this is rubbish at the moment as we have no force to be computed on this
          CALL HBP_colvar(colvar, cell, particles=particles)
+      CASE (charge_colvar_id)
+         CALL charge_colvar(colvar, particles=particles)
       CASE DEFAULT
-         CPABORT("")
+         CPABORT("The requested collective variable is not implemented yet.")
       END SELECT
       ! Check for fixed atom constraints
       IF (PRESENT(fixd_list)) CALL check_fixed_atom_cns_colv(fixd_list, colvar)
@@ -1792,8 +1888,10 @@ CONTAINS
          CALL ring_puckering_colvar(colvar, cell, subsys=subsys)
       CASE (mindist_colvar_id)
          CALL mindist_colvar(colvar, cell, subsys=subsys)
+      CASE (charge_colvar_id)
+         CALL charge_colvar(colvar, subsys=subsys, force_env=force_env)
       CASE DEFAULT
-         CPABORT("")
+         CPABORT("The requested collective variable is not implemented yet.")
       END SELECT
       ! Check for fixed atom constraints
       CALL check_fixed_atom_cns_colv(subsys%gci%fixd_list, colvar)
@@ -1864,8 +1962,10 @@ CONTAINS
          CALL Wc_colvar(colvar, cell, particles=particles)
       CASE (HBP_colvar_id)
          CALL HBP_colvar(colvar, cell, particles=particles)
+      CASE (charge_colvar_id)
+         CALL charge_colvar(colvar, particles=particles)
       CASE DEFAULT
-         CPABORT("")
+         CPABORT("The requested collective variable is not implemented yet.")
       END SELECT
    END SUBROUTINE colvar_recursive_eval
 
@@ -6094,5 +6194,512 @@ CONTAINS
       END FUNCTION distance
 
    END SUBROUTINE HBP_colvar
+
+! **************************************************************************************************
+!> \brief Evaluate the force due (and on) the charge collective variable
+!> \param colvar Collective variables information
+!> \param subsys Subsystem information
+!> \param particles Particles information
+!> \param force_env Force environment
+!> \date  09.2024
+!> \author Rangsiman Ketkaew
+!> \note  This subroutine makes use of the nuclear gradient of MO subroutine
+!>        and population method.
+! **************************************************************************************************
+
+   SUBROUTINE charge_colvar(colvar, subsys, particles, force_env)
+
+      TYPE(colvar_type), POINTER                         :: colvar
+      TYPE(cp_subsys_type), OPTIONAL, POINTER            :: subsys
+      TYPE(particle_type), DIMENSION(:), OPTIONAL, &
+         POINTER                                         :: particles
+      TYPE(force_env_type), OPTIONAL, POINTER            :: force_env
+
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'charge_colvar'
+
+      CHARACTER(LEN=default_string_length)               :: func, pop_method, description
+      INTEGER                                            :: handle, i, ii, natom_1, natom_2, nspin, &
+                                                            output_unit, print_level, nsgf
+      INTEGER, DIMENSION(:), POINTER                     :: group_atoms, list_dcdr_atoms
+      LOGICAL                                            :: unique = .TRUE.
+      REAL(KIND=dp)                                      :: q1, q2
+      REAL(KIND=dp), DIMENSION(3)                        :: dqdr
+      REAL(KIND=dp), DIMENSION(:), POINTER               :: all_sumorbpop
+      REAL(KIND=dp), DIMENSION(:, :), POINTER            :: orbpop
+      REAL(KIND=dp), DIMENSION(:, :), ALLOCATABLE        :: coord_1, coord_2
+      TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
+      TYPE(cp_fm_type), DIMENSION(:, :), POINTER         :: dsdr
+      TYPE(cp_fm_type), DIMENSION(:, :, :), POINTER      :: dcdr
+      TYPE(cp_result_type), POINTER                      :: results
+      TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: matrix_s
+      TYPE(dbcsr_p_type), DIMENSION(:, :), POINTER       :: matrix_p, matrix_s_kp
+      TYPE(dft_control_type), POINTER                    :: dft_control
+      TYPE(mo_set_type), DIMENSION(:), POINTER           :: mos
+      TYPE(mp_para_env_type), POINTER                    :: para_env
+      TYPE(particle_list_type), POINTER                  :: particles_i
+      TYPE(particle_type), DIMENSION(:), POINTER         :: my_particles, particle_set
+      TYPE(section_vals_type), POINTER                   :: dcdr_section
+      TYPE(qs_environment_type), POINTER                 :: qs_env
+      TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
+      TYPE(qs_rho_type), POINTER                         :: rho
+
+      NULLIFY (atomic_kind_set, para_env, qs_env, matrix_p, matrix_s, matrix_s_kp, &
+               dcdr, dsdr, dft_control, qs_kind_set, rho, mos, particle_set, &
+               my_particles, particles_i, group_atoms, list_dcdr_atoms, orbpop, all_sumorbpop)
+
+      CALL timeset(routineN, handle)
+
+      print_level = colvar%charge_param%print_level
+      output_unit = cp_logger_get_default_io_unit()
+
+      CPASSERT(colvar%type_id == charge_colvar_id)
+      IF (output_unit > 0) THEN
+         WRITE (output_unit, FMT='(/,A)') " COLVARS| CHARGE  >>> START CHARGE COLVAR CALCULATION"
+      END IF
+
+      !---------------------------------------------------------------------
+      ! Prepare ingradients
+      !---------------------------------------------------------------------
+      ! Get info from the output and check it
+      natom_1 = colvar%charge_param%n_atoms_group_1
+      natom_2 = colvar%charge_param%n_atoms_group_2
+      pop_method = colvar%charge_param%pop_method
+      func = colvar%charge_param%func
+      ! Get particle info from subsys
+      IF (PRESENT(particles)) THEN
+         my_particles => particles
+      ELSE
+         CPASSERT(PRESENT(subsys))
+         CALL cp_subsys_get(subsys, particles=particles_i)
+         my_particles => particles_i%els
+      END IF
+      ! Get coordinate of each group
+      ALLOCATE (coord_1(natom_1, 3)) ! no. of atoms x 3 coordinates
+      ALLOCATE (coord_2(natom_2, 3)) ! no. of atoms x 3 coordinates
+      DO ii = 1, natom_1
+         i = colvar%charge_param%group_1(ii)
+         CALL get_coordinates(colvar, i, coord_1(ii, :), my_particles)
+      END DO
+      DO ii = 1, natom_2
+         i = colvar%charge_param%group_2(ii)
+         CALL get_coordinates(colvar, i, coord_2(ii, :), my_particles)
+      END DO
+      ! Get necessary matrices from QS
+      qs_env => force_env%qs_env
+      CALL get_qs_env(qs_env=qs_env, &
+                      atomic_kind_set=atomic_kind_set, &
+                      dft_control=dft_control, &
+                      qs_kind_set=qs_kind_set, &
+                      matrix_s=matrix_s, &
+                      matrix_s_kp=matrix_s_kp, &
+                      particle_set=particle_set, &
+                      rho=rho, &
+                      mos=mos, &
+                      para_env=para_env, &
+                      results=results)
+      IF (PRESENT(force_env)) THEN
+         CPASSERT(ASSOCIATED(atomic_kind_set))
+         CPASSERT(ASSOCIATED(qs_kind_set))
+         CPASSERT(ASSOCIATED(particle_set))
+         CPASSERT(ASSOCIATED(rho))
+         CPASSERT(ASSOCIATED(matrix_s_kp))
+      ELSE
+         CPABORT("CHARGE COLVAR: Quick Step environment is not present")
+      END IF
+
+      ! Get density matrix in sparse format
+      CALL qs_rho_get(rho, rho_ao_kp=matrix_p)
+      ! Get the perturbed wavefunction (nuclear derivatives of MO coeff)
+      dcdr => qs_env%linres_control%dcdr
+      ! Get overlap matrix derivative
+      dsdr => qs_env%linres_control%matrix_s1
+      ! Print it if needed for debug
+      IF (print_level .EQ. 2) THEN
+         IF (output_unit > 0) THEN
+            WRITE (output_unit, FMT='(A)') "COLVARS| Overlap Matrix Derivatives"
+            CALL cp_fm_write_formatted(qs_env%linres_control%matrix_s1(1, 1), output_unit)
+            WRITE (output_unit, FMT='(A)') " "
+         END IF
+      END IF
+      ! Check that spin numbers are the same
+      CPASSERT(SIZE(matrix_p, 1) == dft_control%nspins)
+      nspin = dft_control%nspins ! Equal to 1 for closed-shell, and 2 for open-shell systems
+
+      !---------------------------------------------------------------------
+      ! Compute the charge CV
+      !---------------------------------------------------------------------
+
+      ! Get the total number of contracted spherical Gaussian basis functions
+      CALL get_qs_kind_set(qs_kind_set, nsgf=nsgf)
+      ! Allocate an array that stores the orbital populations for each spin
+      ALLOCATE (orbpop(nsgf, nspin))
+
+      q1 = 0.0_dp
+      q2 = 0.0_dp
+
+      SELECT CASE (pop_method)
+      CASE ("MULLIKEN")
+         ! Get the atomic orbital populations from the saved results
+         description = "[MULLIKEN-ORBPOP]"
+         CALL get_results(results=results, description=description, values=orbpop)
+         ! Group 1
+         group_atoms => colvar%charge_param%group_1
+         CALL tot_orbpop_charge(orbpop, group_atoms, qs_kind_set, particle_set, q1)
+         ! Group 2
+         NULLIFY (group_atoms)
+         group_atoms => colvar%charge_param%group_2
+         CALL tot_orbpop_charge(orbpop, group_atoms, qs_kind_set, particle_set, q2)
+      CASE ("APT")
+         ! group 1
+         group_atoms => colvar%charge_param%group_1
+         DO i = 1, natom_1
+            q1 = q1 + ((qs_env%linres_control%gapt_charge(1, 1, group_atoms(i)) &
+                        + qs_env%linres_control%gapt_charge(2, 2, group_atoms(i)) &
+                        + qs_env%linres_control%gapt_charge(3, 3, group_atoms(i)) &
+                        )/3._dp)
+         END DO
+         NULLIFY (group_atoms)
+         ! group 2
+         group_atoms => colvar%charge_param%group_2
+         DO i = 1, natom_2
+            q2 = q2 + ((qs_env%linres_control%gapt_charge(1, 1, group_atoms(i)) &
+                        + qs_env%linres_control%gapt_charge(2, 2, group_atoms(i)) &
+                        + qs_env%linres_control%gapt_charge(3, 3, group_atoms(i)) &
+                        )/3._dp)
+         END DO
+      END SELECT
+
+      IF (output_unit > 0) THEN
+         WRITE (output_unit, FMT='(A)') " COLVARS| CHARGE  >>> CHARGE CONTRIBUTION"
+         WRITE (output_unit, FMT="(A,T69,F12.6)") " COLVARS| CHARGE  >>> TOTAL CHARGE GROUP 1 =", q1
+         WRITE (output_unit, FMT="(A,T69,F12.6)") " COLVARS| CHARGE  >>> TOTAL CHARGE GROUP 2 =", q2
+      END IF
+
+      ! Calculate the actual CV
+      SELECT CASE (func)
+      CASE ("DIFF")
+         colvar%ss = q1 - q2
+      CASE ("SUM")
+         colvar%ss = q1 + q2
+      END SELECT
+      IF (output_unit > 0) THEN
+         WRITE (output_unit, FMT="(A,T69,F12.6)") " COLVARS| CHARGE  >>> CV =", colvar%ss
+      END IF
+
+      !---------------------------------------------------------------------
+      ! Compute the nuclear derivative (atom i-th) of charge analytically
+      ! according to the chosen population method and then store it
+      !---------------------------------------------------------------------
+      
+      ! Get a list of atoms that involves the charge CV from DCDR
+      dcdr_section => section_vals_get_subs_vals(qs_env%input, "PROPERTIES%LINRES%DCDR")
+      CALL section_vals_val_get(dcdr_section, "LIST_OF_ATOMS", i_vals=list_dcdr_atoms)
+      ! Sort the list and check if all elements is unique
+      CALL sort_unique(list_dcdr_atoms, unique)
+      IF (.NOT. unique) THEN
+         CPABORT("All atom index defined in DCDR must be unique")
+      END IF 
+
+      ! Loop over atoms that involve charge CV and DCDR calculation
+      DO i = 1, SIZE(list_dcdr_atoms)
+         CALL dqdr_atom(qs_env, mos, i, matrix_s, nspin, dcdr, dsdr, dqdr)
+         ! Check dqdr before appending it to MD
+         IF (dqdr(1) .EQ. 0.0_dp .OR. dqdr(2) .EQ. 0.0_dp .OR. dqdr(3) .EQ. 0.0_dp) &
+            CPABORT("dqdR is equal to 0. This should not have happened!")
+         CALL put_derivative(colvar, i, dqdr)
+         IF (output_unit > 0) THEN
+            WRITE (output_unit, FMT="(A,I3,T36,3E15.6)") " COLVARS| CHARGE  >>> dqdR Atom", list_dcdr_atoms(i), dqdr
+         END IF
+      END DO
+
+      ! Clean-up: linres components
+      IF (ASSOCIATED(orbpop)) DEALLOCATE (orbpop)
+      CALL charge_cv_cleanup(qs_env)
+
+      CALL timestop(handle)
+
+   END SUBROUTINE charge_colvar
+
+! **************************************************************************************************
+!> \brief Calculate total charge of a group of selected atoms in a molecule using orbital population
+!> \param orbpop Orbital population
+!> \param group_atoms List of atomic indices in a given group
+!> \param qs_kind_set QuickStep kind
+!> \param particle_set Particles information
+!> \param tot_q Total charge
+!> \date  09.2024
+!> \author Rangsiman Ketkaew
+! **************************************************************************************************
+
+   SUBROUTINE tot_orbpop_charge(orbpop, group_atoms, qs_kind_set, particle_set, tot_q)
+
+      REAL(KIND=dp), DIMENSION(:, :), POINTER            :: orbpop
+      INTEGER, DIMENSION(:), POINTER                     :: group_atoms
+      TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
+      TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+      REAL(KIND=dp)                                      :: tot_q
+
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'tot_orbpop_charge'
+
+      CHARACTER(LEN=2)                                   :: element_symbol
+      CHARACTER(LEN=6), DIMENSION(:), POINTER            :: sgf_symbol
+      INTEGER                                            :: handle, iao, iatom, ikind, ind_atom, &
+                                                            iset, isgf, ishell, iso, l, nset, &
+                                                            nsgf, nspin
+      INTEGER, DIMENSION(:), POINTER                     :: nshell
+      INTEGER, DIMENSION(:, :), POINTER                  :: lshell
+      REAL(KIND=dp)                                      :: zeff
+      REAL(KIND=dp), DIMENSION(3)                        :: sumorbpop, totsumorbpop
+      TYPE(gto_basis_set_type), POINTER                  :: orb_basis_set
+
+      NULLIFY (nshell, lshell, sgf_symbol, orb_basis_set)
+
+      CALL timeset(routineN, handle)
+
+      CPASSERT(ASSOCIATED(orbpop))
+      CPASSERT(ASSOCIATED(group_atoms))
+      CPASSERT(ASSOCIATED(particle_set))
+
+      nspin = SIZE(orbpop, 2)
+
+      CALL get_qs_kind_set(qs_kind_set, nsgf=nsgf)
+
+      tot_q = 0.0_dp
+      totsumorbpop(:) = 0.0_dp
+
+      iao = 1
+      ! loop over atom
+      DO iatom = 1, SIZE(group_atoms)
+         sumorbpop(:) = 0.0_dp
+         NULLIFY (orb_basis_set)
+         ! Get atomic symbol and number
+         ind_atom = group_atoms(iatom)
+         CALL get_atomic_kind(atomic_kind=particle_set(ind_atom)%atomic_kind, &
+                              element_symbol=element_symbol, &
+                              kind_number=ikind)
+         ! Get effective nuclear charge
+         CALL get_qs_kind(qs_kind_set(ikind), basis_set=orb_basis_set, zeff=zeff)
+         ! atom has an orbital basis
+         ! loop over it
+         IF (ASSOCIATED(orb_basis_set)) THEN
+            CALL get_gto_basis_set(gto_basis_set=orb_basis_set, &
+                                   nset=nset, &
+                                   nshell=nshell, &
+                                   l=lshell, &
+                                   sgf_symbol=sgf_symbol)
+            isgf = 1
+            DO iset = 1, nset
+               DO ishell = 1, nshell(iset)
+                  l = lshell(ishell, iset)
+                  DO iso = 1, nso(l)
+                     IF (nspin == 1) THEN
+                        sumorbpop(1) = sumorbpop(1) + orbpop(iao, 1)
+                     ELSE
+                        sumorbpop(1:2) = sumorbpop(1:2) + orbpop(iao, 1:2)
+                        sumorbpop(3) = sumorbpop(3) + orbpop(iao, 1) - orbpop(iao, 2)
+                     END IF
+                     isgf = isgf + 1
+                     iao = iao + 1
+                  END DO
+               END DO
+            END DO
+            IF (nspin == 1) THEN
+               totsumorbpop(1) = totsumorbpop(1) + sumorbpop(1)
+               totsumorbpop(3) = totsumorbpop(3) + zeff - sumorbpop(1)
+               tot_q = tot_q + (zeff - sumorbpop(1))
+            ELSE
+               totsumorbpop(1:2) = totsumorbpop(1:2) + sumorbpop(1:2)
+               totsumorbpop(3) = totsumorbpop(3) + zeff - sumorbpop(1) - sumorbpop(2)
+               tot_q = tot_q + (zeff - sumorbpop(1) - sumorbpop(2))
+            END IF
+         END IF
+         
+      END DO
+
+      CALL timestop(handle)
+
+   END SUBROUTINE tot_orbpop_charge
+
+! **************************************************************************************************
+!> \brief Determine nuclear derivative of a partial charge for a given atom (for 3 directions)
+!> \param qs_env Quick step information
+!> \param mos Molecular Orbitals information
+!> \param i_atom atom i-th to calculate dqdr
+!> \param matrix_s Overlap matrix
+!> \param nspin Number of spin
+!> \param dcdr Nuclear derivative of MO coeff (no. atom x 3 directions x nspin)
+!> \param dsdr Nuclear derivative of overlap matrix (no. atom x 3 directions)
+!> \param dqdr Nuclear derivative of charge
+!> \date  09.2024
+!> \author Rangsiman Ketkaew
+! **************************************************************************************************
+
+   SUBROUTINE dqdr_atom(qs_env, mos, i_atom, matrix_s, nspin, dcdr, dsdr, dqdr)
+
+      TYPE(qs_environment_type), POINTER                 :: qs_env
+      TYPE(mo_set_type), DIMENSION(:), POINTER           :: mos
+      INTEGER                                            :: i_atom
+      TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: matrix_s
+      INTEGER                                            :: nspin
+      TYPE(cp_fm_type), DIMENSION(:, :, :), POINTER      :: dcdr
+      TYPE(cp_fm_type), DIMENSION(:, :), POINTER         :: dsdr
+      REAL(KIND=dp), DIMENSION(3)                        :: dqdr
+
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'dqdr_atom'
+
+      INTEGER                                            :: handle, i, ii, nao, nmo, nmo_alp, nmo_bet
+      REAL(KIND=dp)                                      :: ftmp, ftmp_trc
+      TYPE(cp_fm_struct_type), POINTER                   :: fm_struct, fm_struct_alp, fm_struct_bet
+      TYPE(cp_fm_type)                                   :: fst, fst_alp, fst_bet, one, one_alp, &
+                                                            one_bet, sec, sec_alp, sec_bet, thr, &
+                                                            thr_alp, thr_bet, tmp, tmp_alp, tmp_bet
+      TYPE(cp_fm_type), POINTER                          :: mo_coeff, mo_coeff_alp, mo_coeff_bet
+      TYPE(mp_para_env_type), POINTER                    :: para_env
+      TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
+
+      NULLIFY (fm_struct, fm_struct_alp, fm_struct_bet, mo_coeff, mo_coeff_alp, mo_coeff_bet)
+
+      CALL timeset(routineN, handle)
+
+      CALL get_qs_env(qs_env=qs_env, &
+                      qs_kind_set=qs_kind_set, &
+                      para_env=para_env)
+
+      ! Get MO coefficients based on spin
+      SELECT CASE (nspin)
+      CASE (1)
+         CALL get_mo_set(mo_set=mos(1), mo_coeff=mo_coeff, nao=nao, nmo=nmo)
+      CASE (2)
+         CALL get_mo_set(mo_set=mos(1), mo_coeff=mo_coeff_alp, nao=nao, nmo=nmo_alp)
+         CALL get_mo_set(mo_set=mos(2), mo_coeff=mo_coeff_bet, nao=nao, nmo=nmo_bet)
+      END SELECT
+
+      ! Create temporary matrix
+      SELECT CASE (nspin)
+      CASE (1)
+         CALL cp_fm_create(matrix=tmp, matrix_struct=mo_coeff%matrix_struct)
+      CASE (2)
+         CALL cp_fm_create(matrix=tmp_alp, matrix_struct=mo_coeff_alp%matrix_struct)
+         CALL cp_fm_create(matrix=tmp_bet, matrix_struct=mo_coeff_bet%matrix_struct)
+      END SELECT
+
+      ! Create product matrix
+      SELECT CASE (nspin)
+      CASE (1)
+         CALL cp_fm_struct_create(fm_struct, &
+                                  context=mo_coeff%matrix_struct%context, &
+                                  nrow_global=nmo, &
+                                  ncol_global=nmo, &
+                                  para_env=para_env)
+      CASE (2)
+         CALL cp_fm_struct_create(fm_struct_alp, &
+                                  context=mo_coeff_alp%matrix_struct%context, &
+                                  nrow_global=nmo_alp, &
+                                  ncol_global=nmo_alp, &
+                                  para_env=para_env)
+         CALL cp_fm_struct_create(fm_struct_bet, &
+                                  context=mo_coeff_bet%matrix_struct%context, &
+                                  nrow_global=nmo_bet, &
+                                  ncol_global=nmo_bet, &
+                                  para_env=para_env)
+      END SELECT
+
+      ! Create product matrix and its identity matrix
+      SELECT CASE (nspin)
+      CASE (1)
+         CALL cp_fm_create(matrix=fst, matrix_struct=fm_struct)
+         CALL cp_fm_create(matrix=sec, matrix_struct=fm_struct)
+         CALL cp_fm_create(matrix=thr, matrix_struct=fm_struct)
+         CALL cp_fm_create(matrix=one, matrix_struct=fm_struct)
+         CALL cp_fm_set_all(one, 0.0_dp, 1.0_dp)
+      CASE (2)
+         CALL cp_fm_create(matrix=fst_alp, matrix_struct=fm_struct_alp)
+         CALL cp_fm_create(matrix=sec_alp, matrix_struct=fm_struct_alp)
+         CALL cp_fm_create(matrix=thr_alp, matrix_struct=fm_struct_alp)
+         CALL cp_fm_create(matrix=fst_bet, matrix_struct=fm_struct_bet)
+         CALL cp_fm_create(matrix=sec_bet, matrix_struct=fm_struct_bet)
+         CALL cp_fm_create(matrix=thr_bet, matrix_struct=fm_struct_bet)
+         CALL cp_fm_create(matrix=one_alp, matrix_struct=fm_struct_alp)
+         CALL cp_fm_set_all(one_alp, 0.0_dp, 1.0_dp)
+         CALL cp_fm_create(matrix=one_bet, matrix_struct=fm_struct_bet)
+         CALL cp_fm_set_all(one_bet, 0.0_dp, 1.0_dp)
+      END SELECT
+
+      ! Build dqdr of atom i-th and for each direction
+      dqdr = 0.0_dp
+      
+      i = i_atom
+      DO ii = 1, 3
+         ftmp = 0.0_dp
+         SELECT CASE (nspin)
+         !-------------------------------------------------------------------------
+         ! Closed-shell
+         ! We have only one spin here
+         ! => First term : dc/dR_mu,i * S_mu,nu * c_nu,i
+         !    Second term: c_mu,i * S_mu,nu * d/dRc_nu,i
+         !    Third term : c_mu,i * dS/dR_mu,nu * c_nu,i
+         !-------------------------------------------------------------------------
+         CASE (1)
+            CALL mult_fm_sm_fm(dcdr(i, ii, 1), matrix_s(1)%matrix, mo_coeff, tmp, fst, nao, nmo)
+            CALL mult_fm_sm_fm(mo_coeff, matrix_s(1)%matrix, dcdr(i, ii, 1), tmp, sec, nao, nmo)
+            CALL mult_fm_fm_fm(mo_coeff, dsdr(i, ii), mo_coeff, tmp, thr, nao, nmo)
+            CALL cp_fm_trace(one, fst, ftmp_trc)
+            ftmp = ftmp + ftmp_trc
+            CALL cp_fm_trace(one, sec, ftmp_trc)
+            ftmp = ftmp + ftmp_trc
+            CALL cp_fm_trace(one, thr, ftmp_trc)
+            ftmp = ftmp + ftmp_trc
+            !-------------------------------------------------------------------------
+            ! Open-shell
+            ! Same as closed-shell, but now we have two spins: alpha & beta
+            !-------------------------------------------------------------------------
+         CASE (2)
+            ! Alpha
+            CALL mult_fm_sm_fm(dcdr(i, ii, 1), matrix_s(1)%matrix, mo_coeff_alp, tmp_alp, fst_alp, nao, nmo_alp)
+            CALL mult_fm_sm_fm(mo_coeff_alp, matrix_s(1)%matrix, dcdr(i, ii, 1), tmp_alp, sec_alp, nao, nmo_alp)
+            CALL mult_fm_fm_fm(mo_coeff_alp, dsdr(i, ii), mo_coeff_alp, tmp_alp, thr_alp, nao, nmo_alp)
+            CALL cp_fm_trace(one_alp, fst_alp, ftmp_trc)
+            ftmp = ftmp + ftmp_trc
+            CALL cp_fm_trace(one_alp, sec_alp, ftmp_trc)
+            ftmp = ftmp + ftmp_trc
+            CALL cp_fm_trace(one_alp, thr_alp, ftmp_trc)
+            ftmp = ftmp + ftmp_trc
+            ! Beta
+            CALL mult_fm_sm_fm(dcdr(i, ii, 2), matrix_s(1)%matrix, mo_coeff_bet, tmp_bet, fst_bet, nao, nmo_bet)
+            CALL mult_fm_sm_fm(mo_coeff_bet, matrix_s(1)%matrix, dcdr(i, ii, 2), tmp_bet, sec_bet, nao, nmo_bet)
+            CALL mult_fm_fm_fm(mo_coeff_bet, dsdr(i, ii), mo_coeff_bet, tmp_bet, thr_bet, nao, nmo_bet)
+            CALL cp_fm_trace(one_bet, fst_bet, ftmp_trc)
+            ftmp = ftmp + ftmp_trc
+            CALL cp_fm_trace(one_bet, sec_bet, ftmp_trc)
+            ftmp = ftmp + ftmp_trc
+            CALL cp_fm_trace(one_bet, thr_bet, ftmp_trc)
+            ftmp = ftmp + ftmp_trc
+         ! Get final dqdr
+         END SELECT
+         dqdr(ii) = ftmp
+      END DO
+
+      CALL cp_fm_struct_release(fm_struct)
+      CALL cp_fm_struct_release(fm_struct_alp)
+      CALL cp_fm_struct_release(fm_struct_bet)
+      CALL cp_fm_release(tmp)
+      CALL cp_fm_release(tmp_alp)
+      CALL cp_fm_release(tmp_bet)
+      CALL cp_fm_release(fst)
+      CALL cp_fm_release(sec)
+      CALL cp_fm_release(thr)
+      CALL cp_fm_release(one)
+      CALL cp_fm_release(fst_alp)
+      CALL cp_fm_release(sec_alp)
+      CALL cp_fm_release(thr_alp)
+      CALL cp_fm_release(one_alp)
+      CALL cp_fm_release(fst_bet)
+      CALL cp_fm_release(sec_bet)
+      CALL cp_fm_release(thr_bet)
+      CALL cp_fm_release(one_bet)
+
+      CALL timestop(handle)
+
+   END SUBROUTINE dqdr_atom
 
 END MODULE colvar_methods
