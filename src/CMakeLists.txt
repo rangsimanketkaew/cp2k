@@ -79,6 +79,7 @@ list(
   bse_util.F
   bsse.F
   cell_methods.F
+  colvar_elec_utils.F
   colvar_methods.F
   colvar_utils.F
   commutator_rkinetic.F
