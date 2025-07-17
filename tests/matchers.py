@@ -271,4 +271,7 @@ registry["Dipole_for_CrSBr"] = GenericMatcher(r"  1  31  32", col=8)
 
 # Berry curvature calculated from dipoles near K point in graphene BZ
 registry["BC_near_K_point"] = GenericMatcher(r"   1    4", col=5)
+
+registry["M128"] = GenericMatcher(r"COLVARS| CHARGE  >>> CV =", col=6)
+
 # EOF
