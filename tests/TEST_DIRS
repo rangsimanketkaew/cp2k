@@ -457,3 +457,7 @@ QS/regtest-cneo
 QS/regtest-tddfpt-bse                                       libint libxc
 QS/regtest-tdwf
 QS/regtest-hybrid-ace-gs                                    libint
+Fist/regtest-17
+
+# TODO: Re-enable once problems with MPI are resolved (https://github.com/cp2k/cp2k/pull/4445)
+# QS/regtest-tddfpt-bse                                       libint libxc
