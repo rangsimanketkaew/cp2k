@@ -38,7 +38,8 @@ MODULE colvar_methods
         torsion_colvar_id, u_colvar_id, xyz_diag_colvar_id, xyz_outerdiag_colvar_id
    USE constraint_fxd,                  ONLY: check_fixed_atom_cns_colv
    USE cp_control_types,                ONLY: dft_control_type
-   USE cp_dbcsr_api,                    ONLY: dbcsr_get_block_p,&
+   USE cp_dbcsr_api,                    ONLY: dbcsr_create,&
+                                              dbcsr_get_block_p,&
                                               dbcsr_iterator_blocks_left,&
                                               dbcsr_iterator_next_block,&
                                               dbcsr_iterator_start,&
@@ -46,7 +47,12 @@ MODULE colvar_methods
                                               dbcsr_iterator_type,&
                                               dbcsr_p_type,&
                                               dbcsr_type
-   USE cp_fm_basic_linalg,              ONLY: cp_fm_trace
+   USE cp_dbcsr_contrib,                ONLY: dbcsr_hadamard_product,&
+                                              dbcsr_trace,&
+                                              dbcsr_print
+   USE cp_dbcsr_operations,             ONLY: copy_fm_to_dbcsr
+   USE cp_fm_basic_linalg,              ONLY: cp_fm_geadd,&
+                                              cp_fm_trace
    USE cp_fm_struct,                    ONLY: cp_fm_struct_create,&
                                               cp_fm_struct_release,&
                                               cp_fm_struct_type
@@ -113,6 +119,7 @@ MODULE colvar_methods
    USE mixed_environment_utils,         ONLY: get_subsys_map_index
    USE molecule_kind_types,             ONLY: fixd_constraint_type
    USE orbital_pointers,                ONLY: nso
+   USE parallel_gemm_api,               ONLY: parallel_gemm
    USE particle_list_types,             ONLY: particle_list_p_type,&
                                               particle_list_type
    USE particle_methods,                ONLY: get_particle_set
@@ -6228,7 +6235,8 @@ CONTAINS
       REAL(KIND=dp), DIMENSION(:, :), POINTER            :: orbpop
       REAL(KIND=dp), DIMENSION(:, :), ALLOCATABLE        :: coord_1, coord_2
       TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
-      TYPE(cp_fm_type), DIMENSION(:, :), POINTER         :: dsdr
+      ! TYPE(cp_fm_type), DIMENSION(:, :), POINTER         :: dsdr
+      TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: dsdr
       TYPE(cp_fm_type), DIMENSION(:, :, :), POINTER      :: dcdr
       TYPE(cp_result_type), POINTER                      :: results
       TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: matrix_s
@@ -6317,7 +6325,10 @@ CONTAINS
       IF (print_level .EQ. 2) THEN
          IF (output_unit > 0) THEN
             WRITE (output_unit, FMT='(A)') "COLVARS| Overlap Matrix Derivatives"
-            CALL cp_fm_write_formatted(qs_env%linres_control%matrix_s1(1, 1), output_unit)
+            ! CALL cp_fm_write_formatted(qs_env%linres_control%matrix_s1(1, 1), output_unit)
+            DO i = 1, 3
+               CALL dbcsr_print(dsdr(i)%matrix, unit_nr=output_unit)
+            END DO
             WRITE (output_unit, FMT='(A)') " "
          END IF
       END IF
@@ -6399,6 +6410,12 @@ CONTAINS
       IF (.NOT. unique) THEN
          CPABORT("All atom index defined in DCDR must be unique")
       END IF 
+
+      ! DO i = 1, SIZE(list_dcdr_atoms)
+      ! DO ii = 1, 3
+      !    CALL cp_fm_write_formatted(dcdr(i, ii, 1), output_unit)
+      ! END DO
+      ! END DO
 
       ! Loop over atoms that involve charge CV and DCDR calculation
       DO i = 1, SIZE(list_dcdr_atoms)
@@ -6542,24 +6559,30 @@ CONTAINS
       TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: matrix_s
       INTEGER                                            :: nspin
       TYPE(cp_fm_type), DIMENSION(:, :, :), POINTER      :: dcdr
-      TYPE(cp_fm_type), DIMENSION(:, :), POINTER         :: dsdr
+      ! TYPE(cp_fm_type), DIMENSION(:, :), POINTER         :: dsdr
+      TYPE(dbcsr_p_type), DIMENSION(:), POINTER       :: dsdr
       REAL(KIND=dp), DIMENSION(3)                        :: dqdr
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'dqdr_atom'
 
-      INTEGER                                            :: handle, i, ii, nao, nmo, nmo_alp, nmo_bet
-      REAL(KIND=dp)                                      :: ftmp, ftmp_trc
+      INTEGER                                            :: handle, i, ii, nao, nmo, nmo_alp, nmo_bet, output_unit
+      REAL(KIND=dp)                                      :: ftmp, tmp_trc
       TYPE(cp_fm_struct_type), POINTER                   :: fm_struct, fm_struct_alp, fm_struct_bet
       TYPE(cp_fm_type)                                   :: fst, fst_alp, fst_bet, one, one_alp, &
                                                             one_bet, sec, sec_alp, sec_bet, thr, &
-                                                            thr_alp, thr_bet, tmp, tmp_alp, tmp_bet
+                                                            thr_alp, thr_bet, tmp, tmp_1, tmp_2, tmp_alp, tmp_bet
       TYPE(cp_fm_type), POINTER                          :: mo_coeff, mo_coeff_alp, mo_coeff_bet
       TYPE(mp_para_env_type), POINTER                    :: para_env
       TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
+      TYPE(dbcsr_type)                                   :: dsdr_dbcsr, tmp_dbcsr, fst_dbcsr, sec_dbcsr
+      TYPE(cp_logger_type), POINTER                      :: logger
 
       NULLIFY (fm_struct, fm_struct_alp, fm_struct_bet, mo_coeff, mo_coeff_alp, mo_coeff_bet)
 
       CALL timeset(routineN, handle)
+
+      logger => cp_get_default_logger()
+      output_unit = cp_logger_get_default_io_unit(logger)
 
       CALL get_qs_env(qs_env=qs_env, &
                       qs_kind_set=qs_kind_set, &
@@ -6578,6 +6601,12 @@ CONTAINS
       SELECT CASE (nspin)
       CASE (1)
          CALL cp_fm_create(matrix=tmp, matrix_struct=mo_coeff%matrix_struct)
+         CALL cp_fm_create(matrix=tmp_1, matrix_struct=mo_coeff%matrix_struct)
+         CALL cp_fm_create(matrix=tmp_2, matrix_struct=mo_coeff%matrix_struct)
+         CALL dbcsr_create(tmp_dbcsr, name="Temporary DBCSR matrix", template=matrix_s(1)%matrix)
+         CALL dbcsr_create(fst_dbcsr, name="Temporary DBCSR matrix", template=matrix_s(1)%matrix)
+         CALL dbcsr_create(sec_dbcsr, name="Temporary DBCSR matrix", template=matrix_s(1)%matrix)
+         CALL dbcsr_create(dsdr_dbcsr, name="Nuclear gradient of overlap matrix", template=matrix_s(1)%matrix)
       CASE (2)
          CALL cp_fm_create(matrix=tmp_alp, matrix_struct=mo_coeff_alp%matrix_struct)
          CALL cp_fm_create(matrix=tmp_bet, matrix_struct=mo_coeff_bet%matrix_struct)
@@ -6635,45 +6664,75 @@ CONTAINS
          !-------------------------------------------------------------------------
          ! Closed-shell
          ! We have only one spin here
-         ! => First term : dc/dR_mu,i * S_mu,nu * c_nu,i
-         !    Second term: c_mu,i * S_mu,nu * d/dRc_nu,i
-         !    Third term : c_mu,i * dS/dR_mu,nu * c_nu,i
+         ! => dq/dR =
+         !  dc/dR_mu,i @ c_nu,i * S_mu,nu + c_mu,i @ dc/dR_nu,i * S_mu,nu + c_mu,i @ c_nu,i @ dS/dR_mu,nu
+         !  =
+         !  (dc/dR_mu,i @ c_nu,i + c_mu,i @ dc/dR_nu,i) * S_mu,nu  +  c_mu,i @ c_nu,i @ dS/dR_mu,nu
+         !         \--------------------v-------------------/             \---------v---------/
+         !                         First term                                  Second term
+         ! @ = Matrix product
+         ! * = Hadamard product
+         !
          !-------------------------------------------------------------------------
          CASE (1)
-            CALL mult_fm_sm_fm(dcdr(i, ii, 1), matrix_s(1)%matrix, mo_coeff, tmp, fst, nao, nmo)
-            CALL mult_fm_sm_fm(mo_coeff, matrix_s(1)%matrix, dcdr(i, ii, 1), tmp, sec, nao, nmo)
-            CALL mult_fm_fm_fm(mo_coeff, dsdr(i, ii), mo_coeff, tmp, thr, nao, nmo)
-            CALL cp_fm_trace(one, fst, ftmp_trc)
-            ftmp = ftmp + ftmp_trc
-            CALL cp_fm_trace(one, sec, ftmp_trc)
-            ftmp = ftmp + ftmp_trc
-            CALL cp_fm_trace(one, thr, ftmp_trc)
-            ftmp = ftmp + ftmp_trc
-            !-------------------------------------------------------------------------
-            ! Open-shell
-            ! Same as closed-shell, but now we have two spins: alpha & beta
-            !-------------------------------------------------------------------------
+            ! First term
+            CALL parallel_gemm("N", "N", nao, nmo, nao, 1.0_dp, dcdr(i, ii, 1), mo_coeff, 0.0_dp, tmp_1)
+            CALL parallel_gemm("N", "N", nao, nmo, nao, 1.0_dp, mo_coeff, dcdr(i, ii, 1), 0.0_dp, tmp_2)
+            CALL cp_fm_geadd(1.0_dp, 'N', tmp_1, 1.0_dp, tmp_2)
+            CALL copy_fm_to_dbcsr(tmp_2, tmp_dbcsr)
+            CALL dbcsr_hadamard_product(tmp_dbcsr, matrix_s(1)%matrix, fst_dbcsr)
+            CALL dbcsr_trace(fst_dbcsr, tmp_trc)
+            ftmp = ftmp + tmp_trc
+            tmp_trc = 0.0_dp
+            ! Second term
+            CALL parallel_gemm("N", "N", nao, nmo, nao, 1.0_dp, mo_coeff, mo_coeff, 0.0_dp, tmp_1)
+            CALL copy_fm_to_dbcsr(tmp_1, tmp_dbcsr)
+            ! CALL copy_fm_to_dbcsr(dsdr(i, ii), dsdr_dbcsr)
+            ! CALL dbcsr_print(tmp_dbcsr)
+            ! CALL cp_fm_write_formatted(dsdr(i, ii), output_unit)
+            print *, "Nuttttt"
+            CALL dbcsr_print(dsdr(ii)%matrix)
+            ! CALL dbcsr_print(dsdr_dbcsr)
+            ! CALL dbcsr_hadamard_product(tmp_dbcsr, dsdr_dbcsr, sec_dbcsr)
+            CALL dbcsr_hadamard_product(tmp_dbcsr, dsdr(ii)%matrix, sec_dbcsr)
+            ! CALL dbcsr_print(sec_dbcsr)
+            CALL dbcsr_trace(sec_dbcsr, tmp_trc)
+            ftmp = ftmp + tmp_trc
+
+            ! CALL mult_fm_sm_fm(dcdr(i, ii, 1), matrix_s(1)%matrix, mo_coeff, tmp, fst, nao, nmo)
+            ! CALL mult_fm_sm_fm(mo_coeff, matrix_s(1)%matrix, dcdr(i, ii, 1), tmp, sec, nao, nmo)
+            ! CALL mult_fm_fm_fm(mo_coeff, dsdr(i, ii), mo_coeff, tmp, thr, nao, nmo)
+            ! CALL cp_fm_trace(one, fst, ftmp_trc)
+            ! ftmp = ftmp + ftmp_trc
+            ! CALL cp_fm_trace(one, sec, ftmp_trc)
+            ! ftmp = ftmp + ftmp_trc
+            ! CALL cp_fm_trace(one, thr, ftmp_trc)
+            ! ftmp = ftmp + ftmp_trc
+         !-------------------------------------------------------------------------
+         ! Open-shell
+         ! Same as closed-shell, but now we have two spins: alpha & beta
+         !-------------------------------------------------------------------------
          CASE (2)
             ! Alpha
             CALL mult_fm_sm_fm(dcdr(i, ii, 1), matrix_s(1)%matrix, mo_coeff_alp, tmp_alp, fst_alp, nao, nmo_alp)
-            CALL mult_fm_sm_fm(mo_coeff_alp, matrix_s(1)%matrix, dcdr(i, ii, 1), tmp_alp, sec_alp, nao, nmo_alp)
-            CALL mult_fm_fm_fm(mo_coeff_alp, dsdr(i, ii), mo_coeff_alp, tmp_alp, thr_alp, nao, nmo_alp)
-            CALL cp_fm_trace(one_alp, fst_alp, ftmp_trc)
-            ftmp = ftmp + ftmp_trc
-            CALL cp_fm_trace(one_alp, sec_alp, ftmp_trc)
-            ftmp = ftmp + ftmp_trc
-            CALL cp_fm_trace(one_alp, thr_alp, ftmp_trc)
-            ftmp = ftmp + ftmp_trc
-            ! Beta
-            CALL mult_fm_sm_fm(dcdr(i, ii, 2), matrix_s(1)%matrix, mo_coeff_bet, tmp_bet, fst_bet, nao, nmo_bet)
-            CALL mult_fm_sm_fm(mo_coeff_bet, matrix_s(1)%matrix, dcdr(i, ii, 2), tmp_bet, sec_bet, nao, nmo_bet)
-            CALL mult_fm_fm_fm(mo_coeff_bet, dsdr(i, ii), mo_coeff_bet, tmp_bet, thr_bet, nao, nmo_bet)
-            CALL cp_fm_trace(one_bet, fst_bet, ftmp_trc)
-            ftmp = ftmp + ftmp_trc
-            CALL cp_fm_trace(one_bet, sec_bet, ftmp_trc)
-            ftmp = ftmp + ftmp_trc
-            CALL cp_fm_trace(one_bet, thr_bet, ftmp_trc)
-            ftmp = ftmp + ftmp_trc
+            ! CALL mult_fm_sm_fm(mo_coeff_alp, matrix_s(1)%matrix, dcdr(i, ii, 1), tmp_alp, sec_alp, nao, nmo_alp)
+            ! CALL mult_fm_fm_fm(mo_coeff_alp, dsdr(i, ii), mo_coeff_alp, tmp_alp, thr_alp, nao, nmo_alp)
+            ! CALL cp_fm_trace(one_alp, fst_alp, ftmp_trc)
+            ! ftmp = ftmp + ftmp_trc
+            ! CALL cp_fm_trace(one_alp, sec_alp, ftmp_trc)
+            ! ftmp = ftmp + ftmp_trc
+            ! CALL cp_fm_trace(one_alp, thr_alp, ftmp_trc)
+            ! ftmp = ftmp + ftmp_trc
+            ! ! Beta
+            ! CALL mult_fm_sm_fm(dcdr(i, ii, 2), matrix_s(1)%matrix, mo_coeff_bet, tmp_bet, fst_bet, nao, nmo_bet)
+            ! CALL mult_fm_sm_fm(mo_coeff_bet, matrix_s(1)%matrix, dcdr(i, ii, 2), tmp_bet, sec_bet, nao, nmo_bet)
+            ! CALL mult_fm_fm_fm(mo_coeff_bet, dsdr(i, ii), mo_coeff_bet, tmp_bet, thr_bet, nao, nmo_bet)
+            ! CALL cp_fm_trace(one_bet, fst_bet, ftmp_trc)
+            ! ftmp = ftmp + ftmp_trc
+            ! CALL cp_fm_trace(one_bet, sec_bet, ftmp_trc)
+            ! ftmp = ftmp + ftmp_trc
+            ! CALL cp_fm_trace(one_bet, thr_bet, ftmp_trc)
+            ! ftmp = ftmp + ftmp_trc
          ! Get final dqdr
          END SELECT
          dqdr(ii) = ftmp
