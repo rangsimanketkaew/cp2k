@@ -40,15 +40,13 @@ MODULE colvar_methods
                                               dbcsr_p_type,&
                                               dbcsr_set,&
                                               dbcsr_type,&
-                                              dbcsr_type_no_symmetry
+                                              dbcsr_type_no_symmetry,&
+                                              dbcsr_release
    USE cp_dbcsr_contrib,                ONLY: dbcsr_hadamard_product,&
                                               dbcsr_print,&
                                               dbcsr_trace
    USE cp_dbcsr_operations,             ONLY: copy_fm_to_dbcsr
    USE cp_fm_basic_linalg,              ONLY: cp_fm_geadd
-   USE cp_fm_struct,                    ONLY: cp_fm_struct_create,&
-                                              cp_fm_struct_release,&
-                                              cp_fm_struct_type
    USE cp_fm_types,                     ONLY: cp_fm_create,&
                                               cp_fm_release,&
                                               cp_fm_set_all,&
@@ -6342,7 +6340,7 @@ CONTAINS
       CASE ("MULLIKEN")
          ! Get the atomic orbital populations from the saved results
          description = "[MULLIKEN-ORBPOP]"
-         CALL get_results(results=results, description=description, values=orbpop)
+         CALL get_results(results=results, description=description, values=orbpop(:, :))
          ! Group 1
          group_atoms => colvar%charge_param%group_1
          CALL tot_orbpop_charge(orbpop, group_atoms, qs_kind_set, particle_set, q1)
@@ -6403,7 +6401,7 @@ CONTAINS
 
       ! Loop over atoms that involve charge CV and DCDR calculation
       DO i = 1, SIZE(list_dcdr_atoms)
-         CALL dqdr_atom(qs_env, mos, i, matrix_s, nspin, dcdr, dsdr, dqdr)
+         CALL dqdr_atom(mos, i, matrix_s, nspin, dcdr, dsdr, dqdr)
          ! Check dqdr before appending it to MD
          IF (dqdr(1) .EQ. 0.0_dp .OR. dqdr(2) .EQ. 0.0_dp .OR. dqdr(3) .EQ. 0.0_dp) &
             CPABORT("dqdR is equal to 0. This should not have happened!")
@@ -6523,7 +6521,6 @@ CONTAINS
 
 ! **************************************************************************************************
 !> \brief Determine nuclear derivative of a partial charge for a given atom (for 3 directions)
-!> \param qs_env Quick step information
 !> \param mos Molecular Orbitals information
 !> \param i_atom atom i-th to calculate dqdr
 !> \param matrix_s Overlap matrix
@@ -6535,9 +6532,8 @@ CONTAINS
 !> \author Rangsiman Ketkaew
 ! **************************************************************************************************
 
-   SUBROUTINE dqdr_atom(qs_env, mos, i_atom, matrix_s, nspin, dcdr, dsdr, dqdr)
+   SUBROUTINE dqdr_atom(mos, i_atom, matrix_s, nspin, dcdr, dsdr, dqdr)
 
-      TYPE(qs_environment_type), POINTER                 :: qs_env
       TYPE(mo_set_type), DIMENSION(:), POINTER           :: mos
       INTEGER                                            :: i_atom
       TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: matrix_s
@@ -6548,101 +6544,59 @@ CONTAINS
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'dqdr_atom'
 
-      INTEGER                                            :: handle, i, ii, nao, nmo, nmo_alp, &
-                                                            nmo_bet, output_unit
+      INTEGER                                            :: handle, i, ii, nao, nao_alp, nao_bet, nmo, &
+                                                            nmo_alp, nmo_bet, output_unit
       REAL(KIND=dp)                                      :: ftmp, tmp_trc
-      TYPE(cp_fm_struct_type), POINTER                   :: fm_struct, fm_struct_alp, fm_struct_bet
-      TYPE(cp_fm_type)                                   :: fst, fst_alp, fst_bet, one, one_alp, &
-                                                            one_bet, sec, sec_alp, sec_bet, thr, &
-                                                            thr_alp, thr_bet, tmp, tmp_1, tmp_2, &
-                                                            tmp_alp, tmp_bet
+      TYPE(cp_fm_type)                                   :: tmp_1, tmp_2, tmp_alp_1, tmp_alp_2, &
+                                                            tmp_bet_1, tmp_bet_2
       TYPE(cp_fm_type), POINTER                          :: mo_coeff, mo_coeff_alp, mo_coeff_bet
       TYPE(cp_logger_type), POINTER                      :: logger
       TYPE(dbcsr_type)                                   :: dsdr_dbcsr, fst_dbcsr, sec_dbcsr, &
                                                             tmp_dbcsr
-      TYPE(mp_para_env_type), POINTER                    :: para_env
-      TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
 
-      NULLIFY (fm_struct, fm_struct_alp, fm_struct_bet, mo_coeff, mo_coeff_alp, mo_coeff_bet)
+      NULLIFY (mo_coeff, mo_coeff_alp, mo_coeff_bet)
 
       CALL timeset(routineN, handle)
 
       logger => cp_get_default_logger()
       output_unit = cp_logger_get_default_io_unit(logger)
 
-      CALL get_qs_env(qs_env=qs_env, &
-                      qs_kind_set=qs_kind_set, &
-                      para_env=para_env)
-
       ! Get MO coefficients based on spin
       SELECT CASE (nspin)
       CASE (1)
          CALL get_mo_set(mo_set=mos(1), mo_coeff=mo_coeff, nao=nao, nmo=nmo)
       CASE (2)
-         CALL get_mo_set(mo_set=mos(1), mo_coeff=mo_coeff_alp, nao=nao, nmo=nmo_alp)
-         CALL get_mo_set(mo_set=mos(2), mo_coeff=mo_coeff_bet, nao=nao, nmo=nmo_bet)
+         CALL get_mo_set(mo_set=mos(1), mo_coeff=mo_coeff_alp, nao=nao_alp, nmo=nmo_alp)
+         CALL get_mo_set(mo_set=mos(2), mo_coeff=mo_coeff_bet, nao=nao_bet, nmo=nmo_bet)
       END SELECT
 
-      ! Create temporary matrix
+      ! Create temporary full matrices
       SELECT CASE (nspin)
       CASE (1)
-         CALL cp_fm_create(matrix=tmp, matrix_struct=mo_coeff%matrix_struct)
          CALL cp_fm_create(matrix=tmp_1, matrix_struct=mo_coeff%matrix_struct)
          CALL cp_fm_create(matrix=tmp_2, matrix_struct=mo_coeff%matrix_struct)
-         CALL dbcsr_create(tmp_dbcsr, name="Temporary DBCSR matrix", &
-                           template=matrix_s(1)%matrix, matrix_type=dbcsr_type_no_symmetry)
-         CALL dbcsr_create(fst_dbcsr, name="Temporary DBCSR matrix", &
-                           template=matrix_s(1)%matrix, matrix_type=dbcsr_type_no_symmetry)
-         CALL dbcsr_create(sec_dbcsr, name="Temporary DBCSR matrix", &
-                           template=matrix_s(1)%matrix, matrix_type=dbcsr_type_no_symmetry)
-         CALL dbcsr_create(dsdr_dbcsr, name="Nuclear gradient of overlap matrix", &
-                           template=matrix_s(1)%matrix, matrix_type=dbcsr_type_no_symmetry)
+         CALL cp_fm_set_all(tmp_1, 0.0_dp)
+         CALL cp_fm_set_all(tmp_2, 0.0_dp)
       CASE (2)
-         CALL cp_fm_create(matrix=tmp_alp, matrix_struct=mo_coeff_alp%matrix_struct)
-         CALL cp_fm_create(matrix=tmp_bet, matrix_struct=mo_coeff_bet%matrix_struct)
+         CALL cp_fm_create(matrix=tmp_alp_1, matrix_struct=mo_coeff_alp%matrix_struct)
+         CALL cp_fm_create(matrix=tmp_alp_2, matrix_struct=mo_coeff_alp%matrix_struct)
+         CALL cp_fm_create(matrix=tmp_bet_1, matrix_struct=mo_coeff_bet%matrix_struct)
+         CALL cp_fm_create(matrix=tmp_bet_2, matrix_struct=mo_coeff_bet%matrix_struct)
+         CALL cp_fm_set_all(tmp_alp_1, 0.0_dp)
+         CALL cp_fm_set_all(tmp_alp_2, 0.0_dp)
+         CALL cp_fm_set_all(tmp_bet_1, 0.0_dp)
+         CALL cp_fm_set_all(tmp_bet_2, 0.0_dp)
       END SELECT
 
-      ! Create product matrix
-      SELECT CASE (nspin)
-      CASE (1)
-         CALL cp_fm_struct_create(fm_struct, &
-                                  context=mo_coeff%matrix_struct%context, &
-                                  nrow_global=nmo, &
-                                  ncol_global=nmo, &
-                                  para_env=para_env)
-      CASE (2)
-         CALL cp_fm_struct_create(fm_struct_alp, &
-                                  context=mo_coeff_alp%matrix_struct%context, &
-                                  nrow_global=nmo_alp, &
-                                  ncol_global=nmo_alp, &
-                                  para_env=para_env)
-         CALL cp_fm_struct_create(fm_struct_bet, &
-                                  context=mo_coeff_bet%matrix_struct%context, &
-                                  nrow_global=nmo_bet, &
-                                  ncol_global=nmo_bet, &
-                                  para_env=para_env)
-      END SELECT
-
-      ! Create product matrix and its identity matrix
-      SELECT CASE (nspin)
-      CASE (1)
-         CALL cp_fm_create(matrix=fst, matrix_struct=fm_struct)
-         CALL cp_fm_create(matrix=sec, matrix_struct=fm_struct)
-         CALL cp_fm_create(matrix=thr, matrix_struct=fm_struct)
-         CALL cp_fm_create(matrix=one, matrix_struct=fm_struct)
-         CALL cp_fm_set_all(one, 0.0_dp, 1.0_dp)
-      CASE (2)
-         CALL cp_fm_create(matrix=fst_alp, matrix_struct=fm_struct_alp)
-         CALL cp_fm_create(matrix=sec_alp, matrix_struct=fm_struct_alp)
-         CALL cp_fm_create(matrix=thr_alp, matrix_struct=fm_struct_alp)
-         CALL cp_fm_create(matrix=fst_bet, matrix_struct=fm_struct_bet)
-         CALL cp_fm_create(matrix=sec_bet, matrix_struct=fm_struct_bet)
-         CALL cp_fm_create(matrix=thr_bet, matrix_struct=fm_struct_bet)
-         CALL cp_fm_create(matrix=one_alp, matrix_struct=fm_struct_alp)
-         CALL cp_fm_set_all(one_alp, 0.0_dp, 1.0_dp)
-         CALL cp_fm_create(matrix=one_bet, matrix_struct=fm_struct_bet)
-         CALL cp_fm_set_all(one_bet, 0.0_dp, 1.0_dp)
-      END SELECT
+      ! Create temporary DBCSR matrices
+      CALL dbcsr_create(tmp_dbcsr, name="Temporary DBCSR matrix", &
+                        template=matrix_s(1)%matrix, matrix_type=dbcsr_type_no_symmetry)
+      CALL dbcsr_create(fst_dbcsr, name="Temporary DBCSR matrix", &
+                        template=matrix_s(1)%matrix, matrix_type=dbcsr_type_no_symmetry)
+      CALL dbcsr_create(sec_dbcsr, name="Temporary DBCSR matrix", &
+                        template=matrix_s(1)%matrix, matrix_type=dbcsr_type_no_symmetry)
+      CALL dbcsr_create(dsdr_dbcsr, name="Nuclear gradient of overlap matrix", &
+                        template=matrix_s(1)%matrix, matrix_type=dbcsr_type_no_symmetry)
 
       ! Build dqdr of atom i-th and for each direction
       dqdr = 0.0_dp
@@ -6688,24 +6642,22 @@ CONTAINS
          CASE (2)
             ! Alpha
             ! First term
-            CALL parallel_gemm("N", "N", nao, nmo, nao, 1.0_dp, dcdr(i, ii, 1), mo_coeff_alp, 0.0_dp, tmp_1)
-            CALL parallel_gemm("N", "N", nao, nmo, nao, 1.0_dp, mo_coeff_alp, dcdr(i, ii, 1), 0.0_dp, tmp_2)
-            CALL cp_fm_geadd(1.0_dp, 'N', tmp_1, 1.0_dp, tmp_2)
-            CALL copy_fm_to_dbcsr(tmp_2, tmp_dbcsr)
+            CALL parallel_gemm("N", "N", nao_alp, nmo_alp, nao_alp, 1.0_dp, dcdr(i, ii, 1), mo_coeff_alp, 0.0_dp, tmp_alp_1)
+            CALL parallel_gemm("N", "N", nao_alp, nmo_alp, nao_alp, 1.0_dp, mo_coeff_alp, dcdr(i, ii, 1), 0.0_dp, tmp_alp_2)
+            CALL cp_fm_geadd(1.0_dp, 'N', tmp_alp_1, 1.0_dp, tmp_alp_2)
+            CALL copy_fm_to_dbcsr(tmp_alp_2, tmp_dbcsr)
             CALL dbcsr_hadamard_product(tmp_dbcsr, matrix_s(1)%matrix, fst_dbcsr)
             CALL dbcsr_trace(fst_dbcsr, tmp_trc)
             ftmp = ftmp + tmp_trc
             tmp_trc = 0.0_dp
             ! Second term
-            CALL parallel_gemm("N", "N", nao, nmo, nao, 1.0_dp, mo_coeff_alp, mo_coeff_alp, 0.0_dp, tmp_1)
-            CALL copy_fm_to_dbcsr(tmp_1, tmp_dbcsr)
+            CALL parallel_gemm("N", "N", nao_alp, nmo_alp, nao_alp, 1.0_dp, mo_coeff_alp, mo_coeff_alp, 0.0_dp, tmp_alp_1)
+            CALL copy_fm_to_dbcsr(tmp_alp_1, tmp_dbcsr)
             CALL dbcsr_hadamard_product(tmp_dbcsr, dsdr(ii)%matrix, sec_dbcsr)
             CALL dbcsr_trace(sec_dbcsr, tmp_trc)
             ftmp = ftmp + tmp_trc
 
             ! Reset temporary matrices before calculation for beta
-            CALL cp_fm_set_all(tmp_1, 0.0_dp)
-            CALL cp_fm_set_all(tmp_2, 0.0_dp)
             CALL dbcsr_set(tmp_dbcsr, 0.0_dp)
             CALL dbcsr_set(fst_dbcsr, 0.0_dp)
             CALL dbcsr_set(sec_dbcsr, 0.0_dp)
@@ -6713,63 +6665,40 @@ CONTAINS
 
             ! Beta
             ! First term
-            CALL parallel_gemm("N", "N", nao, nmo, nao, 1.0_dp, dcdr(i, ii, 2), mo_coeff_bet, 0.0_dp, tmp_1)
-            CALL parallel_gemm("N", "N", nao, nmo, nao, 1.0_dp, mo_coeff_bet, dcdr(i, ii, 2), 0.0_dp, tmp_2)
-            CALL cp_fm_geadd(1.0_dp, 'N', tmp_1, 1.0_dp, tmp_2)
-            CALL copy_fm_to_dbcsr(tmp_2, tmp_dbcsr)
+            CALL parallel_gemm("N", "N", nao_bet, nmo_bet, nao_bet, 1.0_dp, dcdr(i, ii, 2), mo_coeff_bet, 0.0_dp, tmp_bet_1)
+            CALL parallel_gemm("N", "N", nao_bet, nmo_bet, nao_bet, 1.0_dp, mo_coeff_bet, dcdr(i, ii, 2), 0.0_dp, tmp_bet_2)
+            CALL cp_fm_geadd(1.0_dp, 'N', tmp_bet_1, 1.0_dp, tmp_bet_2)
+            CALL copy_fm_to_dbcsr(tmp_bet_2, tmp_dbcsr)
             CALL dbcsr_hadamard_product(tmp_dbcsr, matrix_s(1)%matrix, fst_dbcsr)
             CALL dbcsr_trace(fst_dbcsr, tmp_trc)
             ftmp = ftmp + tmp_trc
             tmp_trc = 0.0_dp
             ! Second term
-            CALL parallel_gemm("N", "N", nao, nmo, nao, 1.0_dp, mo_coeff_bet, mo_coeff_bet, 0.0_dp, tmp_1)
-            CALL copy_fm_to_dbcsr(tmp_1, tmp_dbcsr)
+            CALL parallel_gemm("N", "N", nao_bet, nmo_bet, nao_bet, 1.0_dp, mo_coeff_bet, mo_coeff_bet, 0.0_dp, tmp_bet_1)
+            CALL copy_fm_to_dbcsr(tmp_bet_1, tmp_dbcsr)
             CALL dbcsr_hadamard_product(tmp_dbcsr, dsdr(ii)%matrix, sec_dbcsr)
             CALL dbcsr_trace(sec_dbcsr, tmp_trc)
             ftmp = ftmp + tmp_trc
 
-            ! CALL mult_fm_sm_fm(dcdr(i, ii, 1), matrix_s(1)%matrix, mo_coeff_alp, tmp_alp, fst_alp, nao, nmo_alp)
-            ! CALL mult_fm_sm_fm(mo_coeff_alp, matrix_s(1)%matrix, dcdr(i, ii, 1), tmp_alp, sec_alp, nao, nmo_alp)
-            ! CALL mult_fm_fm_fm(mo_coeff_alp, dsdr(i, ii), mo_coeff_alp, tmp_alp, thr_alp, nao, nmo_alp)
-            ! CALL cp_fm_trace(one_alp, fst_alp, ftmp_trc)
-            ! ftmp = ftmp + ftmp_trc
-            ! CALL cp_fm_trace(one_alp, sec_alp, ftmp_trc)
-            ! ftmp = ftmp + ftmp_trc
-            ! CALL cp_fm_trace(one_alp, thr_alp, ftmp_trc)
-            ! ftmp = ftmp + ftmp_trc
-            ! ! Beta
-            ! CALL mult_fm_sm_fm(dcdr(i, ii, 2), matrix_s(1)%matrix, mo_coeff_bet, tmp_bet, fst_bet, nao, nmo_bet)
-            ! CALL mult_fm_sm_fm(mo_coeff_bet, matrix_s(1)%matrix, dcdr(i, ii, 2), tmp_bet, sec_bet, nao, nmo_bet)
-            ! CALL mult_fm_fm_fm(mo_coeff_bet, dsdr(i, ii), mo_coeff_bet, tmp_bet, thr_bet, nao, nmo_bet)
-            ! CALL cp_fm_trace(one_bet, fst_bet, ftmp_trc)
-            ! ftmp = ftmp + ftmp_trc
-            ! CALL cp_fm_trace(one_bet, sec_bet, ftmp_trc)
-            ! ftmp = ftmp + ftmp_trc
-            ! CALL cp_fm_trace(one_bet, thr_bet, ftmp_trc)
-            ! ftmp = ftmp + ftmp_trc
-            ! Get final dqdr
          END SELECT
          dqdr(ii) = ftmp
       END DO
 
-      CALL cp_fm_struct_release(fm_struct)
-      CALL cp_fm_struct_release(fm_struct_alp)
-      CALL cp_fm_struct_release(fm_struct_bet)
-      CALL cp_fm_release(tmp)
-      CALL cp_fm_release(tmp_alp)
-      CALL cp_fm_release(tmp_bet)
-      CALL cp_fm_release(fst)
-      CALL cp_fm_release(sec)
-      CALL cp_fm_release(thr)
-      CALL cp_fm_release(one)
-      CALL cp_fm_release(fst_alp)
-      CALL cp_fm_release(sec_alp)
-      CALL cp_fm_release(thr_alp)
-      CALL cp_fm_release(one_alp)
-      CALL cp_fm_release(fst_bet)
-      CALL cp_fm_release(sec_bet)
-      CALL cp_fm_release(thr_bet)
-      CALL cp_fm_release(one_bet)
+      SELECT CASE (nspin)
+      CASE (1)
+         CALL cp_fm_release(tmp_1)
+         CALL cp_fm_release(tmp_2)
+      CASE (2)
+         CALL cp_fm_release(tmp_alp_1)
+         CALL cp_fm_release(tmp_alp_2)
+         CALL cp_fm_release(tmp_bet_1)
+         CALL cp_fm_release(tmp_bet_2)
+      END SELECT
+
+      CALL dbcsr_release(tmp_dbcsr)
+      CALL dbcsr_release(fst_dbcsr)
+      CALL dbcsr_release(sec_dbcsr)
+      CALL dbcsr_release(dsdr_dbcsr)
 
       CALL timestop(handle)
 
