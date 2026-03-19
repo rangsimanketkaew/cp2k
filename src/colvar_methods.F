@@ -6216,7 +6216,7 @@ CONTAINS
       INTEGER                                            :: handle, i, ii, natom_1, natom_2, nspin, &
                                                             output_unit, print_level, nsgf
       INTEGER, DIMENSION(:), POINTER                     :: group_atoms, list_dcdr_atoms
-      LOGICAL                                            :: unique = .TRUE.
+      LOGICAL                                            :: unique
       REAL(KIND=dp)                                      :: q1, q2
       REAL(KIND=dp), DIMENSION(3)                        :: dqdr
       REAL(KIND=dp), DIMENSION(:), POINTER               :: all_sumorbpop
@@ -6310,7 +6310,7 @@ CONTAINS
       ! Get overlap matrix derivative
       dsdr => qs_env%linres_control%matrix_s1
       ! Print it if needed for debug
-      IF (print_level .EQ. 2) THEN
+      IF (print_level == 2) THEN
          IF (output_unit > 0) THEN
             WRITE (output_unit, FMT='(A)') "COLVARS| Overlap Matrix Derivatives"
             DO i = 1, 3
@@ -6402,7 +6402,7 @@ CONTAINS
       DO i = 1, SIZE(list_dcdr_atoms)
          CALL dqdr_atom(mos, i, matrix_s, nspin, dcdr, dsdr, dqdr)
          ! Check dqdr before appending it to MD
-         IF (dqdr(1) .EQ. 0.0_dp .OR. dqdr(2) .EQ. 0.0_dp .OR. dqdr(3) .EQ. 0.0_dp) &
+         IF (dqdr(1) == 0.0_dp .OR. dqdr(2) == 0.0_dp .OR. dqdr(3) == 0.0_dp) &
             CPABORT("dqdR is equal to 0. This should not have happened!")
          CALL put_derivative(colvar, i, dqdr)
          IF (output_unit > 0) THEN
