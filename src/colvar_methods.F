@@ -6209,7 +6209,6 @@ CONTAINS
       REAL(KIND=dp), DIMENSION(:, :), POINTER            :: orbpop
       REAL(KIND=dp), DIMENSION(:, :), ALLOCATABLE        :: coord_1, coord_2
       TYPE(atomic_kind_type), DIMENSION(:), POINTER      :: atomic_kind_set
-      ! TYPE(cp_fm_type), DIMENSION(:, :), POINTER         :: dsdr
       TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: dsdr
       TYPE(cp_fm_type), DIMENSION(:, :, :), POINTER      :: dcdr
       TYPE(cp_result_type), POINTER                      :: results
